@@ -81,7 +81,7 @@ def optimize_cfg(
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
-    lambda_range: tuple = (2.5, 10.0),
+    lambda_range: tuple = (-10.0, 10.0),
     num_images_per_prompt: int = 8,
 ):
     finetuned_pipeline = load_finetuned_pipeline(
@@ -165,7 +165,7 @@ def main():
         "--lambda_range",
         type=float,
         nargs=2,
-        default=[2.5, 10.0],
+        default=[-10.0, 10.0],
         help="Range for lambda optimization",
     )
     parser.add_argument(

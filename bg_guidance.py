@@ -85,7 +85,7 @@ def optimize_bg_lambda(
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
-    lambda_range: tuple = (2.5, 10.0),
+    lambda_range: tuple = (-10.0, 10.0),
     omega: float = 0.0,
     num_images_per_prompt: int = 8,
 ):
@@ -143,7 +143,13 @@ def optimize_bg_omega(
     )
     finetuned_pipeline.set_pretrained_models(pretrained_pipeline)
 
-    def objective(omega_val):
+    omega_values = [round(i * 0.1, 1) for i in range(11)]
+    best_omega = 0.0
+    best_dino = -float('inf')
+    all_results = {}
+
+    for omega_val in omega_values:
+        print(f"Evaluating omega={omega_val:.1f}...")
         scores = evaluate_bg(
             pretrained_model_path=pretrained_model_path,
             lora_path=lora_path,
@@ -155,12 +161,14 @@ def optimize_bg_omega(
             num_images_per_prompt=num_images_per_prompt,
         )
         dino_score = scores.get("DINO", 0)
-        return -dino_score
+        all_results[omega_val] = scores
+        
+        if dino_score > best_dino:
+            best_dino = dino_score
+            best_omega = omega_val
 
-    best_omega, best_score = golden_section_search(
-        objective, omega_range[0], omega_range[1]
-    )
-
+    print(f"\nBest omega: {best_omega:.1f} (DINO: {best_dino:.4f})")
+    
     best_scores = evaluate_bg(
         pretrained_model_path=pretrained_model_path,
         lora_path=lora_path,
@@ -181,7 +189,7 @@ def optimize_bg_both(
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
-    lambda_range: tuple = (2.5, 10.0),
+    lambda_range: tuple = (-10.0, 10.0),
     omega_range: tuple = (0.0, 1.0),
     num_images_per_prompt: int = 8,
 ):
@@ -268,7 +276,7 @@ def main():
         "--lambda_range",
         type=float,
         nargs=2,
-        default=[2.5, 10.0],
+        default=[-10.0, 10.0],
         help="Range for lambda optimization",
     )
     parser.add_argument(

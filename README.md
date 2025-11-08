@@ -49,7 +49,7 @@ python ag_guidance.py \
     --evaluation_prompts_path evaluation_prompts.json \
     --output_dir ./ag_outputs \
     --cfg_scale 7.5 \
-    --guidance_scale 2.0 \
+    --lambda_range -10 10 \
     --weak_checkpoint_path ./outputs/checkpoint-500 \
     --optimize
 ```
@@ -72,25 +72,34 @@ python bg_guidance.py \
 
 ## Optimization
 
-All guidance methods use golden section search to optimize parameters based on **DINO score** (subject fidelity).
+Optimization uses **DINO score** (subject fidelity) as the objective.
 
-- CFG: Optimizes `--guidance_scale` (lambda)
-- AG: Optimizes `--guidance_scale` (AG lambda), uses fixed `--cfg_scale` (CFG lambda)
-- BG: Optimizes `--guidance_scale` (lambda) and `--omega` (weight interpolation)
+- CFG: Golden section search for `--guidance_scale` (lambda)
+- AG: Golden section search for `--guidance_scale` (lambda), uses fixed `--cfg_scale` (CFG lambda = 7.5)
+- BG: Golden section search for `--guidance_scale` (lambda), grid sweep for `--omega` 
 
 ## Parameters
 
-- `--guidance_scale`: Guidance strength (lambda)
-- `--cfg_scale`: CFG scale for AG method (default: 7.5)
-- `--omega`: Weight interpolation parameter for BG (0.0-1.0)
+- `--guidance_scale`: Guidance strength (lambda, optimized for CFG/AG/BG)
+- `--cfg_scale`: CFG scale for AG method (depending on best lambda for cfg)
+- `--lambda_range`: Range for lambda optimization (default: [-10.0, 10.0] for all methods)
+- `--omega`: Weight interpolation parameter for BG (0.0-1.0, swept in 0.1 steps)
 - `--weak_checkpoint_path`: Earlier checkpoint for AG weak model (optional)
+
+## Evaluation Metrics
+
+- **DINO**: Subject fidelity (optimization target)
+- **CLIP-I**: Image-to-image consistency
+- **CLIP-T**: Text-to-image alignment
 
 ## Files
 
-- `train_dreambooth_lora.py`: LoRA training with prior-preservation
-- `cfg_guidance.py`: CFG evaluation and optimization
-- `ag_guidance.py`: CFG + AG evaluation and optimization
-- `bg_guidance.py`: Bhavik Guidance evaluation and optimization
-- `guidance_methods.py`: Core guidance implementations
-- `golden_search.py`: Golden section search optimization
-- `evaluation_code.py`: Evaluation metrics computation
+- `train_dreambooth_lora.py`: LoRA training
+- `guidance_methods.py`: Core guidance implementations (CFG, AG, BG)
+- `cfg_guidance.py`: CFG evaluation
+- `ag_guidance.py`: CFG + AG evaluation
+- `bg_guidance.py`: BG evaluation
+- `evaluation_code.py`: Evaluation metrics (DINO, CLIP-I, CLIP-T)
+- `golden_search.py`: Parameter optimization
+- `evaluation_prompts.json`: Evaluation prompts
+- `requirements.txt`: Dependencies

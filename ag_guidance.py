@@ -93,8 +93,8 @@ def optimize_ag(
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
-    lambda_range: tuple = (1.0, 5.0),
     cfg_scale: float = 7.5,
+    lambda_range: tuple = (-10.0, 10.0),
     weak_checkpoint_path: str = None,
     num_images_per_prompt: int = 8,
 ):
@@ -103,7 +103,7 @@ def optimize_ag(
             pretrained_model_path=pretrained_model_path,
             lora_path=lora_path,
             evaluation_prompts_path=evaluation_prompts_path,
-            output_dir=os.path.join(output_dir, f"temp_ag_{lambda_val}"),
+            output_dir=os.path.join(output_dir, f"temp_ag_lambda_{lambda_val}"),
             device=device,
             guidance_scale=lambda_val,
             cfg_scale=cfg_scale,
@@ -179,13 +179,13 @@ def main():
     parser.add_argument(
         "--optimize",
         action="store_true",
-        help="Optimize AG guidance scale using golden search",
+        help="Optimize AG guidance scale (lambda) using golden search",
     )
     parser.add_argument(
         "--lambda_range",
         type=float,
         nargs=2,
-        default=[1.0, 5.0],
+        default=[-10.0, 10.0],
         help="Range for lambda optimization",
     )
     parser.add_argument(
@@ -206,20 +206,21 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.optimize:
-        print("Optimizing AutoGuidance scale...")
+        print("Optimizing AG guidance scale (lambda)...")
         best_lambda, scores = optimize_ag(
             pretrained_model_path=args.pretrained_model_path,
             lora_path=args.lora_path,
             evaluation_prompts_path=args.evaluation_prompts_path,
             output_dir=args.output_dir,
             device=args.device,
-            lambda_range=tuple(args.lambda_range),
             cfg_scale=args.cfg_scale,
+            lambda_range=tuple(args.lambda_range),
             weak_checkpoint_path=args.weak_checkpoint_path,
             num_images_per_prompt=args.num_images_per_prompt,
         )
         print(f"\n=== AutoGuidance Optimization Results ===")
         print(f"Best Lambda: {best_lambda:.4f}")
+        print(f"CFG Scale: {args.cfg_scale:.4f}")
         print(f"Scores:")
         for metric, score in scores.items():
             if score is not None:
@@ -228,6 +229,7 @@ def main():
         results = {
             "method": "ag",
             "lambda": best_lambda,
+            "cfg_scale": args.cfg_scale,
             "scores": scores,
         }
         results_path = os.path.join(args.output_dir, "ag_optimization_results.json")
