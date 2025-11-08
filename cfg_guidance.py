@@ -77,9 +77,9 @@ def evaluate_cfg(
         subject = evaluator.subject_per_prompt[idx]
         
         if subject != current_subject:
-            lora_path = evaluator._find_lora_path(subject, lora_base_dir)
+            lora_path = evaluator._find_lora_path(subject, lora_base_dir, checkpoint_type="full")
             if not lora_path:
-                print(f"Warning: No LoRA model found for subject '{subject}' in {lora_base_dir}, skipping...")
+                print(f"Warning: No fully trained LoRA model found for subject '{subject}' in {lora_base_dir}, skipping...")
                 continue
             
             current_pipeline = load_finetuned_pipeline(

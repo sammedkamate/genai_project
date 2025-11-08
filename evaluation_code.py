@@ -99,32 +99,26 @@ class Evaluator:
         instance_dir = Path(self.instance_data_dir)
         
         subjects = list(set(self.subject_per_prompt))
-        folder_to_subject = {}
         
         for folder_path in instance_dir.iterdir():
             if folder_path.is_dir():
                 folder_name = folder_path.name
                 normalized_subject = self._normalize_folder_to_subject(folder_name, subjects)
                 if normalized_subject:
-                    if normalized_subject not in folder_to_subject:
-                        folder_to_subject[normalized_subject] = []
-                    folder_to_subject[normalized_subject].append(folder_path)
-        
-        for subject in subjects:
-            if subject in folder_to_subject:
-                all_ref_images = []
-                for folder_path in folder_to_subject[subject]:
                     image_files = sorted([f for f in folder_path.iterdir() 
                                         if f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp']])
+                    ref_images = []
                     for img_path in image_files:
                         try:
                             img = Image.open(img_path).convert('RGB')
-                            all_ref_images.append(img)
+                            ref_images.append(img)
                         except Exception as e:
                             print(f"Warning: Could not load {img_path}: {e}")
-                
-                if all_ref_images:
-                    reference_images[subject] = all_ref_images
+                    
+                    if ref_images:
+                        if normalized_subject not in reference_images:
+                            reference_images[normalized_subject] = []
+                        reference_images[normalized_subject].extend(ref_images)
         
         return reference_images
 
@@ -160,7 +154,7 @@ class Evaluator:
             images.append(img)
         return images
 
-    def _find_lora_path(self, subject: str, lora_base_dir: str) -> Optional[str]:
+    def _find_lora_path(self, subject: str, lora_base_dir: str, checkpoint_type: str = "full") -> Optional[str]:
         from pathlib import Path
         base_dir = Path(lora_base_dir)
         
@@ -170,18 +164,32 @@ class Evaluator:
             subject.replace(" ", "-"),
         ]
         
+        full_folder_path = None
+        
         for variant in subject_variants:
-            lora_path = base_dir / variant
-            if lora_path.exists() and lora_path.is_dir():
-                return str(lora_path)
+            full_path = base_dir / variant
+            if full_path.exists() and full_path.is_dir():
+                full_folder_path = full_path
+                break
         
-        for folder_path in base_dir.iterdir():
-            if folder_path.is_dir():
-                normalized_subject = self._normalize_folder_to_subject(folder_path.name, [subject])
-                if normalized_subject == subject:
-                    return str(folder_path)
+        if full_folder_path is None:
+            for folder_path in base_dir.iterdir():
+                if folder_path.is_dir():
+                    normalized_subject = self._normalize_folder_to_subject(folder_path.name, [subject])
+                    if normalized_subject == subject:
+                        full_folder_path = folder_path
+                        break
         
-        return None
+        if full_folder_path is None:
+            return None
+        
+        if checkpoint_type == "full":
+            return str(full_folder_path)
+        else:
+            weak_path = full_folder_path / checkpoint_type
+            if weak_path.exists() and weak_path.is_dir():
+                return str(weak_path)
+            return None
 
     def evaluate(self) -> Dict[str, float]:
         clip_i_scores, clip_t_scores, dino_scores = [], [], []

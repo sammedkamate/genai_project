@@ -48,7 +48,6 @@ def evaluate_ag(
     device: str = "cuda",
     guidance_scale: float = 2.0,
     cfg_scale: float = 7.5,
-    weak_checkpoint_path: str = None,
     num_images_per_prompt: int = 1,
     instance_data_dir: str = None,
 ):
@@ -61,10 +60,6 @@ def evaluate_ag(
         instance_data_dir=instance_data_dir,
     )
     
-    if weak_checkpoint_path is None:
-        weak_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
-    else:
-        weak_pipeline = None
     
     clip_i_scores, clip_t_scores, dino_scores = [], [], []
     text_features = evaluator._encode_text(evaluator.prompts)
@@ -77,23 +72,20 @@ def evaluate_ag(
         subject = evaluator.subject_per_prompt[idx]
         
         if subject != current_subject:
-            lora_path = evaluator._find_lora_path(subject, lora_base_dir)
-            if not lora_path:
-                print(f"Warning: No LoRA model found for subject '{subject}' in {lora_base_dir}, skipping...")
+            lora_path_full = evaluator._find_lora_path(subject, lora_base_dir, checkpoint_type="full")
+            if not lora_path_full:
+                print(f"Warning: No fully trained LoRA model found for subject '{subject}' in {lora_base_dir}, skipping...")
                 continue
             
             finetuned_pipeline = load_finetuned_pipeline(
-                pretrained_model_path, lora_path, device
+                pretrained_model_path, lora_path_full, device
             )
             
-            if weak_checkpoint_path:
-                subject_weak_path = evaluator._find_lora_path(subject, weak_checkpoint_path)
-                if subject_weak_path:
-                    weak_pipeline = load_finetuned_pipeline(
-                        pretrained_model_path, subject_weak_path, device
-                    )
-                else:
-                    weak_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
+            lora_path_weak = evaluator._find_lora_path(subject, lora_base_dir, checkpoint_type="weak")
+            if lora_path_weak:
+                weak_pipeline = load_finetuned_pipeline(
+                    pretrained_model_path, lora_path_weak, device
+                )
             else:
                 weak_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
             
@@ -197,7 +189,6 @@ def optimize_ag(
     device: str = "cuda",
     cfg_scale: float = 7.5,
     lambda_range: tuple = (-10.0, 10.0),
-    weak_checkpoint_path: str = None,
     num_images_per_prompt: int = 1,
     instance_data_dir: str = None,
 ):
@@ -210,7 +201,6 @@ def optimize_ag(
             device=device,
             guidance_scale=lambda_val,
             cfg_scale=cfg_scale,
-            weak_checkpoint_path=weak_checkpoint_path,
             num_images_per_prompt=num_images_per_prompt,
             instance_data_dir=instance_data_dir,
         )
@@ -229,7 +219,6 @@ def optimize_ag(
         device=device,
         guidance_scale=best_lambda,
         cfg_scale=cfg_scale,
-        weak_checkpoint_path=weak_checkpoint_path,
         num_images_per_prompt=num_images_per_prompt,
         instance_data_dir=instance_data_dir,
     )
@@ -300,12 +289,6 @@ def main():
         help="Number of images per prompt",
     )
     parser.add_argument(
-        "--weak_checkpoint_path",
-        type=str,
-        default=None,
-        help="Path to earlier checkpoint LoRA weights for weak model. If None, uses pretrained model.",
-    )
-    parser.add_argument(
         "--instance_data_dir",
         type=str,
         default=None,
@@ -326,7 +309,6 @@ def main():
             device=args.device,
             cfg_scale=args.cfg_scale,
             lambda_range=tuple(args.lambda_range),
-            weak_checkpoint_path=args.weak_checkpoint_path,
             num_images_per_prompt=args.num_images_per_prompt,
             instance_data_dir=args.instance_data_dir,
         )
@@ -358,7 +340,6 @@ def main():
             device=args.device,
             guidance_scale=args.guidance_scale,
             cfg_scale=args.cfg_scale,
-            weak_checkpoint_path=args.weak_checkpoint_path,
             num_images_per_prompt=args.num_images_per_prompt,
             instance_data_dir=args.instance_data_dir,
         )

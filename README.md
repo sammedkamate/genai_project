@@ -52,9 +52,10 @@ python ag_guidance.py \
     --instance_data_dir /path/to/reference/images \
     --cfg_scale 7.5 \
     --lambda_range -10 10 \
-    --weak_checkpoint_path ./lora_models_weak \
     --optimize
 ```
+
+**Note:** AG automatically uses `weak/` subdirectory within each folder as the weak model checkpoint.
 
 ### Bhavik Guidance
 
@@ -105,26 +106,39 @@ The `instance_data_dir` should contain subject-specific folders. Folder names ar
 - Numbered variants: `cat2`, `dog2`, `dog7`, `dogcd` → `cat`, `dog` (base subject)
 - Underscore variants: `cat_statue` → `cat statue` (underscores converted to spaces)
 
-Multiple folders mapping to the same subject are combined (e.g., `dog`, `dog2`, `dog7` all contribute to `dog` reference images).
+**Note:** Each folder maps to exactly one subject. Folders are not combined.
 
 ### LoRA Models (`lora_base_dir`)
 
-The `lora_base_dir` should contain subject-specific LoRA model folders. **Folder names should match your dataset folder names** (e.g., `cat2`, `dog2`, `dog7`, `cat_statue`, `backpack`). Each subject has its own independently trained LoRA model:
+The `lora_base_dir` should contain subject-specific LoRA model folders. **Each folder must have two checkpoints:**
 
 ```
 lora_models/
-├── backpack/  
-├── cat2/    
-├── dog2/        
-├── dog7/     
-├── cat_statue/  
+├── backpack/
+│   ├── (fully trained checkpoint files)
+│   └── weak/
+│       └── (under-trained checkpoint files)
+├── cat2/
+│   ├── (fully trained checkpoint files)
+│   └── weak/
+│       └── (under-trained checkpoint files)
+├── dog2/
+│   ├── (fully trained checkpoint files)
+│   └── weak/
+│       └── (under-trained checkpoint files)
 └── ...
 ```
+
+**Checkpoint Usage:**
+- **CFG**: Uses fully trained checkpoint (`lora_base_dir/folder_name/`)
+- **AG**: Uses under-trained (`lora_base_dir/folder_name/weak/`) as weak model + fully trained as fine model
+- **BG**: Uses fully trained + pretrained model
 
 **Important:**
 - Folder names in `lora_base_dir` match dataset folder names (e.g., `cat2`, `dog2`, `cat_statue`)
 - Prompts use subject names from `evaluation_prompts.json` (e.g., "cat", "dog", "cat statue")
-- The code automatically maps folder names to subjects using the same logic as reference images
+- The code automatically maps folder names to subjects
+- Each folder is treated as a separate subject (no combining)
 - Each subject's prompts are evaluated independently with that subject's LoRA model
 - Each LoRA model has its own independent guidance optimization
 
