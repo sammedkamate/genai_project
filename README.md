@@ -35,7 +35,7 @@ accelerate launch train_dreambooth_lora.py \
 
 ```bash
 python cfg_guidance.py \
-    --lora_path ./outputs \
+    --lora_base_dir ./lora_models \
     --evaluation_prompts_path evaluation_prompts.json \
     --output_dir ./cfg_outputs \
     --instance_data_dir /path/to/reference/images \
@@ -46,13 +46,13 @@ python cfg_guidance.py \
 
 ```bash
 python ag_guidance.py \
-    --lora_path ./outputs \
+    --lora_base_dir ./lora_models \
     --evaluation_prompts_path evaluation_prompts.json \
     --output_dir ./ag_outputs \
     --instance_data_dir /path/to/reference/images \
     --cfg_scale 7.5 \
     --lambda_range -10 10 \
-    --weak_checkpoint_path ./outputs/checkpoint-500 \
+    --weak_checkpoint_path ./lora_models_weak \
     --optimize
 ```
 
@@ -60,7 +60,7 @@ python ag_guidance.py \
 
 ```bash
 python bg_guidance.py \
-    --lora_path ./outputs \
+    --lora_base_dir ./lora_models \
     --evaluation_prompts_path evaluation_prompts.json \
     --output_dir ./bg_outputs \
     --instance_data_dir /path/to/reference/images \
@@ -94,6 +94,63 @@ Optimization uses **DINO score** (subject fidelity) as the objective.
 - **DINO**: Image-to-image similarity between reference and generated images (subject fidelity, optimization target)
 - **CLIP-I**: Image-to-image similarity between reference and generated images using CLIP embeddings
 - **CLIP-T**: Text-to-image similarity using CLIP embeddings (text prompt alignment)
+
+## Dataset Organization
+
+### Reference Images (`instance_data_dir`)
+
+The `instance_data_dir` should contain subject-specific folders. Folder names are automatically mapped to subjects from `evaluation_prompts.json`:
+
+- Exact matches: `backpack` → `backpack`
+- Numbered variants: `cat2`, `dog2`, `dog7`, `dogcd` → `cat`, `dog` (base subject)
+- Underscore variants: `cat_statue` → `cat statue` (underscores converted to spaces)
+
+Multiple folders mapping to the same subject are combined (e.g., `dog`, `dog2`, `dog7` all contribute to `dog` reference images).
+
+### LoRA Models (`lora_base_dir`)
+
+The `lora_base_dir` should contain subject-specific LoRA model folders. **Folder names should match your dataset folder names** (e.g., `cat2`, `dog2`, `dog7`, `cat_statue`, `backpack`). Each subject has its own independently trained LoRA model:
+
+```
+lora_models/
+├── backpack/  
+├── cat2/    
+├── dog2/        
+├── dog7/     
+├── cat_statue/  
+└── ...
+```
+
+**Important:**
+- Folder names in `lora_base_dir` match dataset folder names (e.g., `cat2`, `dog2`, `cat_statue`)
+- Prompts use subject names from `evaluation_prompts.json` (e.g., "cat", "dog", "cat statue")
+- The code automatically maps folder names to subjects using the same logic as reference images
+- Each subject's prompts are evaluated independently with that subject's LoRA model
+- Each LoRA model has its own independent guidance optimization
+
+## Output Organization
+
+Evaluation outputs are organized as follows:
+
+```
+output_dir/
+├── evaluation_summary.csv          # Summary table with metrics per subject
+├── cat/                            # Images for "cat" subject
+│   ├── 0000_a_cat_in_the_jungle.png
+│   ├── 0001_a_cat_in_the_snow.png
+│   └── ...
+├── dog/                            # Images for "dog" subject
+│   ├── 0005_a_dog_on_the_beach.png
+│   └── ...
+└── ...
+```
+
+The `evaluation_summary.csv` contains:
+- `subject`: Subject name
+- `num_prompts`: Number of prompts evaluated for this subject
+- `CLIP-I`: Average CLIP-I score (image-to-image similarity)
+- `CLIP-T`: Average CLIP-T score (text-to-image similarity)
+- `DINO`: Average DINO score (subject fidelity)
 
 ## Files
 

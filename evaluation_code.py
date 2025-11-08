@@ -64,6 +64,32 @@ class Evaluator:
         self.subject_per_prompt = [s for s in subjects for _ in templates]
         return prompts
 
+    def _normalize_folder_to_subject(self, folder_name: str, subjects: List[str]) -> Optional[str]:
+        folder_lower = folder_name.lower()
+        
+        for subject in subjects:
+            subject_lower = subject.lower()
+            
+            if folder_lower == subject_lower:
+                return subject
+            
+            if folder_lower == subject_lower.replace(" ", "_"):
+                return subject
+            
+            if folder_lower == subject_lower.replace(" ", "-"):
+                return subject
+            
+            if folder_lower.startswith(subject_lower):
+                remaining = folder_lower[len(subject_lower):]
+                if remaining and (remaining[0].isdigit() or remaining[0].isalpha()):
+                    return subject
+        
+        folder_with_spaces = folder_name.replace("_", " ").replace("-", " ")
+        if folder_with_spaces.lower() in [s.lower() for s in subjects]:
+            return next(s for s in subjects if s.lower() == folder_with_spaces.lower())
+        
+        return None
+
     def _load_reference_images(self) -> Dict[str, List[Image.Image]]:
         reference_images = {}
         if not self.instance_data_dir or not os.path.exists(self.instance_data_dir):
@@ -72,25 +98,33 @@ class Evaluator:
         from pathlib import Path
         instance_dir = Path(self.instance_data_dir)
         
-        for subject in set(self.subject_per_prompt):
-            subject_dir = instance_dir / subject
-            if not subject_dir.exists():
-                subject_dir = instance_dir / subject.replace(" ", "_")
-            if not subject_dir.exists():
-                subject_dir = instance_dir / subject.replace(" ", "-")
-            
-            if subject_dir.exists() and subject_dir.is_dir():
-                image_files = sorted([f for f in subject_dir.iterdir() 
-                                    if f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.jpeg']])
-                ref_images = []
-                for img_path in image_files:
-                    try:
-                        img = Image.open(img_path).convert('RGB')
-                        ref_images.append(img)
-                    except Exception as e:
-                        print(f"Warning: Could not load {img_path}: {e}")
-                if ref_images:
-                    reference_images[subject] = ref_images
+        subjects = list(set(self.subject_per_prompt))
+        folder_to_subject = {}
+        
+        for folder_path in instance_dir.iterdir():
+            if folder_path.is_dir():
+                folder_name = folder_path.name
+                normalized_subject = self._normalize_folder_to_subject(folder_name, subjects)
+                if normalized_subject:
+                    if normalized_subject not in folder_to_subject:
+                        folder_to_subject[normalized_subject] = []
+                    folder_to_subject[normalized_subject].append(folder_path)
+        
+        for subject in subjects:
+            if subject in folder_to_subject:
+                all_ref_images = []
+                for folder_path in folder_to_subject[subject]:
+                    image_files = sorted([f for f in folder_path.iterdir() 
+                                        if f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp']])
+                    for img_path in image_files:
+                        try:
+                            img = Image.open(img_path).convert('RGB')
+                            all_ref_images.append(img)
+                        except Exception as e:
+                            print(f"Warning: Could not load {img_path}: {e}")
+                
+                if all_ref_images:
+                    reference_images[subject] = all_ref_images
         
         return reference_images
 
@@ -125,6 +159,29 @@ class Evaluator:
             img = self.pipe(prompt, guidance_scale=7.5).images[0]
             images.append(img)
         return images
+
+    def _find_lora_path(self, subject: str, lora_base_dir: str) -> Optional[str]:
+        from pathlib import Path
+        base_dir = Path(lora_base_dir)
+        
+        subject_variants = [
+            subject,
+            subject.replace(" ", "_"),
+            subject.replace(" ", "-"),
+        ]
+        
+        for variant in subject_variants:
+            lora_path = base_dir / variant
+            if lora_path.exists() and lora_path.is_dir():
+                return str(lora_path)
+        
+        for folder_path in base_dir.iterdir():
+            if folder_path.is_dir():
+                normalized_subject = self._normalize_folder_to_subject(folder_path.name, [subject])
+                if normalized_subject == subject:
+                    return str(folder_path)
+        
+        return None
 
     def evaluate(self) -> Dict[str, float]:
         clip_i_scores, clip_t_scores, dino_scores = [], [], []

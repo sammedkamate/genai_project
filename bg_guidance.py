@@ -2,6 +2,9 @@ import argparse
 import os
 import json
 import torch
+import numpy as np
+import torch.nn.functional as F
+from tqdm import tqdm
 from diffusers import StableDiffusionPipeline, DDIMScheduler
 from guidance_methods import GuidancePipeline
 from evaluation_code import Evaluator
@@ -39,7 +42,7 @@ def load_finetuned_pipeline(
 
 def evaluate_bg(
     pretrained_model_path: str,
-    lora_path: str,
+    lora_base_dir: str,
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
@@ -49,11 +52,7 @@ def evaluate_bg(
     instance_data_dir: str = None,
 ):
     pretrained_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
-    finetuned_pipeline = load_finetuned_pipeline(
-        pretrained_model_path, lora_path, device
-    )
-    finetuned_pipeline.set_pretrained_models(pretrained_pipeline)
-
+    
     evaluator = Evaluator(
         model_path=None,
         json_path=evaluation_prompts_path,
@@ -62,28 +61,121 @@ def evaluate_bg(
         num_images_per_prompt=num_images_per_prompt,
         instance_data_dir=instance_data_dir,
     )
-
-    def generate_images(prompt):
-        result = finetuned_pipeline.generate_with_guidance(
-            prompt=prompt,
-            guidance_method="bg",
-            guidance_scale=guidance_scale,
-            omega=omega,
-            num_inference_steps=50,
-            num_images_per_prompt=num_images_per_prompt,
-        )
-        return result.images
-
-    evaluator.pipe = finetuned_pipeline
-    evaluator._generate_images = generate_images
-
-    scores = evaluator.evaluate()
-    return scores
+    
+    clip_i_scores, clip_t_scores, dino_scores = [], [], []
+    text_features = evaluator._encode_text(evaluator.prompts)
+    
+    subject_metrics = {}
+    current_pipeline = None
+    current_subject = None
+    
+    for idx, prompt in enumerate(tqdm(evaluator.prompts, desc="Evaluating")):
+        subject = evaluator.subject_per_prompt[idx]
+        
+        if subject != current_subject:
+            lora_path = evaluator._find_lora_path(subject, lora_base_dir)
+            if not lora_path:
+                print(f"Warning: No LoRA model found for subject '{subject}' in {lora_base_dir}, skipping...")
+                continue
+            
+            finetuned_pipeline = load_finetuned_pipeline(
+                pretrained_model_path, lora_path, device
+            )
+            finetuned_pipeline.set_pretrained_models(pretrained_pipeline)
+            current_pipeline = finetuned_pipeline
+            current_subject = subject
+            
+            if subject not in subject_metrics:
+                subject_metrics[subject] = {
+                    "clip_i": [],
+                    "clip_t": [],
+                    "dino": [],
+                    "prompt_count": 0
+                }
+        
+        def generate_images(p):
+            result = current_pipeline.generate_with_guidance(
+                prompt=p,
+                guidance_method="bg",
+                guidance_scale=guidance_scale,
+                omega=omega,
+                num_inference_steps=50,
+                num_images_per_prompt=num_images_per_prompt,
+            )
+            return result.images
+        
+        images = generate_images(prompt)
+        img_clip = evaluator._encode_images_clip(images)
+        img_dino = evaluator._encode_images_dino(images)
+        t_feat = text_features[idx].unsqueeze(0).repeat(num_images_per_prompt, 1)
+        
+        clip_t = evaluator._cosine(img_clip, t_feat).mean().item()
+        clip_t_scores.append(clip_t)
+        subject_metrics[subject]["clip_t"].append(clip_t)
+        subject_metrics[subject]["prompt_count"] += 1
+        
+        subject_dir = os.path.join(output_dir, subject.replace(" ", "_"))
+        os.makedirs(subject_dir, exist_ok=True)
+        prompt_safe = prompt.replace("/", "_").replace("\\", "_")[:100]
+        image_path = os.path.join(subject_dir, f"{idx:04d}_{prompt_safe}.png")
+        images[0].save(image_path)
+        
+        if evaluator.reference_images and subject in evaluator.reference_images and len(evaluator.reference_images[subject]) > 0:
+            ref_images = evaluator.reference_images[subject]
+            ref_clip = evaluator._encode_images_clip(ref_images)
+            ref_dino = evaluator._encode_images_dino(ref_images)
+            
+            clip_i_sims = []
+            for gen_feat in img_clip:
+                sims = F.cosine_similarity(
+                    gen_feat.unsqueeze(0),
+                    ref_clip,
+                    dim=1
+                )
+                clip_i_sims.append(sims.max().item())
+            clip_i = np.mean(clip_i_sims)
+            clip_i_scores.append(clip_i)
+            subject_metrics[subject]["clip_i"].append(clip_i)
+            
+            dino_sims = []
+            for gen_feat in img_dino:
+                sims = F.cosine_similarity(
+                    gen_feat.unsqueeze(0),
+                    ref_dino,
+                    dim=1
+                )
+                dino_sims.append(sims.max().item())
+            dino_i = np.mean(dino_sims)
+            dino_scores.append(dino_i)
+            subject_metrics[subject]["dino"].append(dino_i)
+    
+    summary_table = []
+    for subject, metrics in subject_metrics.items():
+        summary_table.append({
+            "subject": subject,
+            "num_prompts": metrics["prompt_count"],
+            "CLIP-I": float(np.mean(metrics["clip_i"])) if metrics["clip_i"] else None,
+            "CLIP-T": float(np.mean(metrics["clip_t"])) if metrics["clip_t"] else None,
+            "DINO": float(np.mean(metrics["dino"])) if metrics["dino"] else None,
+        })
+    
+    import pandas as pd
+    df = pd.DataFrame(summary_table)
+    csv_path = os.path.join(output_dir, "evaluation_summary.csv")
+    df.to_csv(csv_path, index=False)
+    print(f"\nEvaluation summary saved to {csv_path}")
+    
+    return {
+        "CLIP-I": float(np.mean(clip_i_scores)) if clip_i_scores else None,
+        "CLIP-T": float(np.mean(clip_t_scores)),
+        "DINO": float(np.mean(dino_scores)) if dino_scores else None,
+        "per_subject": summary_table,
+    }
 
 
 def optimize_bg_lambda(
     pretrained_model_path: str,
-    lora_path: str,
+    lora_base_dir: str,
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
@@ -92,16 +184,10 @@ def optimize_bg_lambda(
     num_images_per_prompt: int = 1,
     instance_data_dir: str = None,
 ):
-    pretrained_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
-    finetuned_pipeline = load_finetuned_pipeline(
-        pretrained_model_path, lora_path, device
-    )
-    finetuned_pipeline.set_pretrained_models(pretrained_pipeline)
-
     def objective(lambda_val):
         scores = evaluate_bg(
             pretrained_model_path=pretrained_model_path,
-            lora_path=lora_path,
+            lora_base_dir=lora_base_dir,
             evaluation_prompts_path=evaluation_prompts_path,
             output_dir=os.path.join(output_dir, f"temp_bg_lambda_{lambda_val}"),
             device=device,
@@ -119,7 +205,7 @@ def optimize_bg_lambda(
 
     best_scores = evaluate_bg(
         pretrained_model_path=pretrained_model_path,
-        lora_path=lora_path,
+        lora_base_dir=lora_base_dir,
         evaluation_prompts_path=evaluation_prompts_path,
         output_dir=os.path.join(output_dir, "bg_optimized_lambda"),
         device=device,
@@ -134,7 +220,7 @@ def optimize_bg_lambda(
 
 def optimize_bg_omega(
     pretrained_model_path: str,
-    lora_path: str,
+    lora_base_dir: str,
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
@@ -143,12 +229,6 @@ def optimize_bg_omega(
     num_images_per_prompt: int = 1,
     instance_data_dir: str = None,
 ):
-    pretrained_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
-    finetuned_pipeline = load_finetuned_pipeline(
-        pretrained_model_path, lora_path, device
-    )
-    finetuned_pipeline.set_pretrained_models(pretrained_pipeline)
-
     omega_values = [round(i * 0.1, 1) for i in range(11)]
     best_omega = 0.0
     best_dino = -float('inf')
@@ -158,7 +238,7 @@ def optimize_bg_omega(
         print(f"Evaluating omega={omega_val:.1f}...")
         scores = evaluate_bg(
             pretrained_model_path=pretrained_model_path,
-            lora_path=lora_path,
+            lora_base_dir=lora_base_dir,
             evaluation_prompts_path=evaluation_prompts_path,
             output_dir=os.path.join(output_dir, f"temp_bg_omega_{omega_val}"),
             device=device,
@@ -178,7 +258,7 @@ def optimize_bg_omega(
     
     best_scores = evaluate_bg(
         pretrained_model_path=pretrained_model_path,
-        lora_path=lora_path,
+        lora_base_dir=lora_base_dir,
         evaluation_prompts_path=evaluation_prompts_path,
         output_dir=os.path.join(output_dir, "bg_optimized_omega"),
         device=device,
@@ -193,7 +273,7 @@ def optimize_bg_omega(
 
 def optimize_bg_both(
     pretrained_model_path: str,
-    lora_path: str,
+    lora_base_dir: str,
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
@@ -205,7 +285,7 @@ def optimize_bg_both(
     print("Optimizing lambda first...")
     best_lambda, _ = optimize_bg_lambda(
         pretrained_model_path=pretrained_model_path,
-        lora_path=lora_path,
+        lora_base_dir=lora_base_dir,
         evaluation_prompts_path=evaluation_prompts_path,
         output_dir=output_dir,
         device=device,
@@ -219,7 +299,7 @@ def optimize_bg_both(
     print("Optimizing omega...")
     best_omega, best_scores = optimize_bg_omega(
         pretrained_model_path=pretrained_model_path,
-        lora_path=lora_path,
+        lora_base_dir=lora_base_dir,
         evaluation_prompts_path=evaluation_prompts_path,
         output_dir=output_dir,
         device=device,
@@ -241,10 +321,10 @@ def main():
         help="Path to pretrained model",
     )
     parser.add_argument(
-        "--lora_path",
+        "--lora_base_dir",
         type=str,
         required=True,
-        help="Path to trained LoRA weights",
+        help="Base directory containing subject-specific LoRA model folders",
     )
     parser.add_argument(
         "--evaluation_prompts_path",
@@ -318,7 +398,7 @@ def main():
         print("Optimizing BG lambda...")
         best_lambda, scores = optimize_bg_lambda(
             pretrained_model_path=args.pretrained_model_path,
-            lora_path=args.lora_path,
+            lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
             output_dir=args.output_dir,
             device=args.device,
@@ -350,7 +430,7 @@ def main():
         print("Optimizing BG omega...")
         best_omega, scores = optimize_bg_omega(
             pretrained_model_path=args.pretrained_model_path,
-            lora_path=args.lora_path,
+            lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
             output_dir=args.output_dir,
             device=args.device,
@@ -382,7 +462,7 @@ def main():
         print("Optimizing BG lambda and omega...")
         best_lambda, best_omega, scores = optimize_bg_both(
             pretrained_model_path=args.pretrained_model_path,
-            lora_path=args.lora_path,
+            lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
             output_dir=args.output_dir,
             device=args.device,
@@ -414,7 +494,7 @@ def main():
         print(f"Evaluating BG with guidance_scale={args.guidance_scale}, omega={args.omega}...")
         scores = evaluate_bg(
             pretrained_model_path=args.pretrained_model_path,
-            lora_path=args.lora_path,
+            lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
             output_dir=args.output_dir,
             device=args.device,

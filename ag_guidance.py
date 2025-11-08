@@ -2,6 +2,9 @@ import argparse
 import os
 import json
 import torch
+import numpy as np
+import torch.nn.functional as F
+from tqdm import tqdm
 from diffusers import StableDiffusionPipeline, DDIMScheduler
 from guidance_methods import GuidancePipeline
 from evaluation_code import Evaluator
@@ -39,7 +42,7 @@ def load_finetuned_pipeline(
 
 def evaluate_ag(
     pretrained_model_path: str,
-    lora_path: str,
+    lora_base_dir: str,
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
@@ -49,19 +52,6 @@ def evaluate_ag(
     num_images_per_prompt: int = 1,
     instance_data_dir: str = None,
 ):
-    finetuned_pipeline = load_finetuned_pipeline(
-        pretrained_model_path, lora_path, device
-    )
-    
-    if weak_checkpoint_path is None:
-        weak_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
-    else:
-        weak_pipeline = load_finetuned_pipeline(
-            pretrained_model_path, weak_checkpoint_path, device
-        )
-    
-    finetuned_pipeline.set_weak_model(weak_pipeline)
-
     evaluator = Evaluator(
         model_path=None,
         json_path=evaluation_prompts_path,
@@ -70,28 +60,138 @@ def evaluate_ag(
         num_images_per_prompt=num_images_per_prompt,
         instance_data_dir=instance_data_dir,
     )
-
-    def generate_images(prompt):
-        result = finetuned_pipeline.generate_with_guidance(
-            prompt=prompt,
-            guidance_method="ag",
-            guidance_scale=guidance_scale,
-            cfg_scale=cfg_scale,
-            num_inference_steps=50,
-            num_images_per_prompt=num_images_per_prompt,
-        )
-        return result.images
-
-    evaluator.pipe = finetuned_pipeline
-    evaluator._generate_images = generate_images
-
-    scores = evaluator.evaluate()
-    return scores
+    
+    if weak_checkpoint_path is None:
+        weak_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
+    else:
+        weak_pipeline = None
+    
+    clip_i_scores, clip_t_scores, dino_scores = [], [], []
+    text_features = evaluator._encode_text(evaluator.prompts)
+    
+    subject_metrics = {}
+    current_pipeline = None
+    current_subject = None
+    
+    for idx, prompt in enumerate(tqdm(evaluator.prompts, desc="Evaluating")):
+        subject = evaluator.subject_per_prompt[idx]
+        
+        if subject != current_subject:
+            lora_path = evaluator._find_lora_path(subject, lora_base_dir)
+            if not lora_path:
+                print(f"Warning: No LoRA model found for subject '{subject}' in {lora_base_dir}, skipping...")
+                continue
+            
+            finetuned_pipeline = load_finetuned_pipeline(
+                pretrained_model_path, lora_path, device
+            )
+            
+            if weak_checkpoint_path:
+                subject_weak_path = evaluator._find_lora_path(subject, weak_checkpoint_path)
+                if subject_weak_path:
+                    weak_pipeline = load_finetuned_pipeline(
+                        pretrained_model_path, subject_weak_path, device
+                    )
+                else:
+                    weak_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
+            else:
+                weak_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
+            
+            finetuned_pipeline.set_weak_model(weak_pipeline)
+            current_pipeline = finetuned_pipeline
+            current_subject = subject
+            
+            if subject not in subject_metrics:
+                subject_metrics[subject] = {
+                    "clip_i": [],
+                    "clip_t": [],
+                    "dino": [],
+                    "prompt_count": 0
+                }
+        
+        def generate_images(p):
+            result = current_pipeline.generate_with_guidance(
+                prompt=p,
+                guidance_method="ag",
+                guidance_scale=guidance_scale,
+                cfg_scale=cfg_scale,
+                num_inference_steps=50,
+                num_images_per_prompt=num_images_per_prompt,
+            )
+            return result.images
+        
+        images = generate_images(prompt)
+        img_clip = evaluator._encode_images_clip(images)
+        img_dino = evaluator._encode_images_dino(images)
+        t_feat = text_features[idx].unsqueeze(0).repeat(num_images_per_prompt, 1)
+        
+        clip_t = evaluator._cosine(img_clip, t_feat).mean().item()
+        clip_t_scores.append(clip_t)
+        subject_metrics[subject]["clip_t"].append(clip_t)
+        subject_metrics[subject]["prompt_count"] += 1
+        
+        subject_dir = os.path.join(output_dir, subject.replace(" ", "_"))
+        os.makedirs(subject_dir, exist_ok=True)
+        prompt_safe = prompt.replace("/", "_").replace("\\", "_")[:100]
+        image_path = os.path.join(subject_dir, f"{idx:04d}_{prompt_safe}.png")
+        images[0].save(image_path)
+        
+        if evaluator.reference_images and subject in evaluator.reference_images and len(evaluator.reference_images[subject]) > 0:
+            ref_images = evaluator.reference_images[subject]
+            ref_clip = evaluator._encode_images_clip(ref_images)
+            ref_dino = evaluator._encode_images_dino(ref_images)
+            
+            clip_i_sims = []
+            for gen_feat in img_clip:
+                sims = F.cosine_similarity(
+                    gen_feat.unsqueeze(0),
+                    ref_clip,
+                    dim=1
+                )
+                clip_i_sims.append(sims.max().item())
+            clip_i = np.mean(clip_i_sims)
+            clip_i_scores.append(clip_i)
+            subject_metrics[subject]["clip_i"].append(clip_i)
+            
+            dino_sims = []
+            for gen_feat in img_dino:
+                sims = F.cosine_similarity(
+                    gen_feat.unsqueeze(0),
+                    ref_dino,
+                    dim=1
+                )
+                dino_sims.append(sims.max().item())
+            dino_i = np.mean(dino_sims)
+            dino_scores.append(dino_i)
+            subject_metrics[subject]["dino"].append(dino_i)
+    
+    summary_table = []
+    for subject, metrics in subject_metrics.items():
+        summary_table.append({
+            "subject": subject,
+            "num_prompts": metrics["prompt_count"],
+            "CLIP-I": float(np.mean(metrics["clip_i"])) if metrics["clip_i"] else None,
+            "CLIP-T": float(np.mean(metrics["clip_t"])) if metrics["clip_t"] else None,
+            "DINO": float(np.mean(metrics["dino"])) if metrics["dino"] else None,
+        })
+    
+    import pandas as pd
+    df = pd.DataFrame(summary_table)
+    csv_path = os.path.join(output_dir, "evaluation_summary.csv")
+    df.to_csv(csv_path, index=False)
+    print(f"\nEvaluation summary saved to {csv_path}")
+    
+    return {
+        "CLIP-I": float(np.mean(clip_i_scores)) if clip_i_scores else None,
+        "CLIP-T": float(np.mean(clip_t_scores)),
+        "DINO": float(np.mean(dino_scores)) if dino_scores else None,
+        "per_subject": summary_table,
+    }
 
 
 def optimize_ag(
     pretrained_model_path: str,
-    lora_path: str,
+    lora_base_dir: str,
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
@@ -104,7 +204,7 @@ def optimize_ag(
     def objective(lambda_val):
         scores = evaluate_ag(
             pretrained_model_path=pretrained_model_path,
-            lora_path=lora_path,
+            lora_base_dir=lora_base_dir,
             evaluation_prompts_path=evaluation_prompts_path,
             output_dir=os.path.join(output_dir, f"temp_ag_lambda_{lambda_val}"),
             device=device,
@@ -123,7 +223,7 @@ def optimize_ag(
 
     best_scores = evaluate_ag(
         pretrained_model_path=pretrained_model_path,
-        lora_path=lora_path,
+        lora_base_dir=lora_base_dir,
         evaluation_prompts_path=evaluation_prompts_path,
         output_dir=os.path.join(output_dir, "ag_optimized"),
         device=device,
@@ -146,10 +246,10 @@ def main():
         help="Path to pretrained model",
     )
     parser.add_argument(
-        "--lora_path",
+        "--lora_base_dir",
         type=str,
         required=True,
-        help="Path to trained LoRA weights",
+        help="Base directory containing subject-specific LoRA model folders",
     )
     parser.add_argument(
         "--evaluation_prompts_path",
@@ -220,7 +320,7 @@ def main():
         print("Optimizing AG guidance scale (lambda)...")
         best_lambda, scores = optimize_ag(
             pretrained_model_path=args.pretrained_model_path,
-            lora_path=args.lora_path,
+            lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
             output_dir=args.output_dir,
             device=args.device,
@@ -252,7 +352,7 @@ def main():
         print(f"Evaluating AutoGuidance with guidance_scale={args.guidance_scale}...")
         scores = evaluate_ag(
             pretrained_model_path=args.pretrained_model_path,
-            lora_path=args.lora_path,
+            lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
             output_dir=args.output_dir,
             device=args.device,
