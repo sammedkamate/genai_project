@@ -14,10 +14,14 @@ class GuidancePipeline(StableDiffusionPipeline):
         super().__init__(*args, **kwargs)
         self.pretrained_unet = None
         self.pretrained_text_encoder = None
+        self.weak_unet = None
 
     def set_pretrained_models(self, pretrained_pipeline):
         self.pretrained_unet = pretrained_pipeline.unet
         self.pretrained_text_encoder = pretrained_pipeline.text_encoder
+
+    def set_weak_model(self, weak_pipeline):
+        self.weak_unet = weak_pipeline.unet
 
     def _get_unconditional_embeddings(self, batch_size, device):
         uncond_tokens = [""] * batch_size
@@ -70,10 +74,14 @@ class GuidancePipeline(StableDiffusionPipeline):
         prompt_embeds: torch.Tensor,
         guidance_scale: float = 2.0,
     ) -> torch.Tensor:
-        if self.pretrained_unet is None:
-            raise ValueError("Pretrained model not set for AutoGuidance")
+        if self.weak_unet is None:
+            if self.pretrained_unet is None:
+                raise ValueError("Weak model or pretrained model not set for AutoGuidance")
+            weak_unet = self.pretrained_unet
+        else:
+            weak_unet = self.weak_unet
         
-        weak_noise_pred = self.pretrained_unet(
+        weak_noise_pred = weak_unet(
             latents,
             timestep,
             encoder_hidden_states=prompt_embeds,

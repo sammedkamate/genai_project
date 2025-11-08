@@ -44,13 +44,21 @@ def evaluate_ag(
     output_dir: str,
     device: str = "cuda",
     guidance_scale: float = 2.0,
+    weak_checkpoint_path: str = None,
     num_images_per_prompt: int = 8,
 ):
-    pretrained_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
     finetuned_pipeline = load_finetuned_pipeline(
         pretrained_model_path, lora_path, device
     )
-    finetuned_pipeline.set_pretrained_models(pretrained_pipeline)
+    
+    if weak_checkpoint_path is None:
+        weak_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
+    else:
+        weak_pipeline = load_finetuned_pipeline(
+            pretrained_model_path, weak_checkpoint_path, device
+        )
+    
+    finetuned_pipeline.set_weak_model(weak_pipeline)
 
     evaluator = Evaluator(
         model_path=None,
@@ -84,14 +92,9 @@ def optimize_ag(
     output_dir: str,
     device: str = "cuda",
     lambda_range: tuple = (1.0, 5.0),
+    weak_checkpoint_path: str = None,
     num_images_per_prompt: int = 8,
 ):
-    pretrained_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
-    finetuned_pipeline = load_finetuned_pipeline(
-        pretrained_model_path, lora_path, device
-    )
-    finetuned_pipeline.set_pretrained_models(pretrained_pipeline)
-
     def objective(lambda_val):
         scores = evaluate_ag(
             pretrained_model_path=pretrained_model_path,
@@ -100,6 +103,7 @@ def optimize_ag(
             output_dir=os.path.join(output_dir, f"temp_ag_{lambda_val}"),
             device=device,
             guidance_scale=lambda_val,
+            weak_checkpoint_path=weak_checkpoint_path,
             num_images_per_prompt=num_images_per_prompt,
         )
         dino_score = scores.get("DINO", 0)
@@ -116,6 +120,7 @@ def optimize_ag(
         output_dir=os.path.join(output_dir, "ag_optimized"),
         device=device,
         guidance_scale=best_lambda,
+        weak_checkpoint_path=weak_checkpoint_path,
         num_images_per_prompt=num_images_per_prompt,
     )
 
@@ -178,6 +183,12 @@ def main():
         default=8,
         help="Number of images per prompt",
     )
+    parser.add_argument(
+        "--weak_checkpoint_path",
+        type=str,
+        default=None,
+        help="Path to earlier checkpoint LoRA weights for weak model. If None, uses pretrained model.",
+    )
 
     args = parser.parse_args()
 
@@ -192,6 +203,7 @@ def main():
             output_dir=args.output_dir,
             device=args.device,
             lambda_range=tuple(args.lambda_range),
+            weak_checkpoint_path=args.weak_checkpoint_path,
             num_images_per_prompt=args.num_images_per_prompt,
         )
         print(f"\n=== AutoGuidance Optimization Results ===")
@@ -219,6 +231,7 @@ def main():
             output_dir=args.output_dir,
             device=args.device,
             guidance_scale=args.guidance_scale,
+            weak_checkpoint_path=args.weak_checkpoint_path,
             num_images_per_prompt=args.num_images_per_prompt,
         )
         print("\n=== AutoGuidance Evaluation Results ===")
