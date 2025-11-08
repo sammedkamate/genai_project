@@ -64,7 +64,7 @@ class ParameterOptimizer:
         guidance_method: str,
         guidance_scale: float,
         omega: float = 0.0,
-        num_samples: int = 8,
+        num_samples: int = 1,
     ) -> dict:
         temp_output_dir = f"temp_eval_{guidance_method}_{guidance_scale}_{omega}"
         os.makedirs(temp_output_dir, exist_ok=True)

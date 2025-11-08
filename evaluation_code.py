@@ -21,20 +21,23 @@ class Evaluator:
         output_dir: str = "outputs",
         device: Optional[str] = None,
         num_images_per_prompt: int = 1,
+        instance_data_dir: Optional[str] = None,
     ):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.output_dir = output_dir
         self.num_images = num_images_per_prompt
+        self.instance_data_dir = instance_data_dir
         os.makedirs(output_dir, exist_ok=True)
 
-        self.pipe = StableDiffusionPipeline.from_pretrained(
-            model_path, torch_dtype=torch.float16
-        ).to(self.device)
+        if model_path:
+            self.pipe = StableDiffusionPipeline.from_pretrained(
+                model_path, torch_dtype=torch.float16
+            ).to(self.device)
+        else:
+            self.pipe = None
 
         self.clip_model, self.clip_preprocess = clip.load("ViT-B/32", device=self.device)
 
-        # Build an image-encoder for diversity/consistency metric.
-        # Prefer DINOv2-g14 if available in your open_clip build, otherwise fall back to a widely available OpenCLIP model.
         try:
             dino_model, _, dino_preprocess = open_clip.create_model_and_transforms(
                 "dinov2_vitg14", pretrained="laion2b_s39b_b160k"
@@ -50,13 +53,46 @@ class Evaluator:
         self.preprocess_dino = dino_preprocess
 
         self.prompts = self._load_prompts(json_path)
+        self.reference_images = self._load_reference_images() if instance_data_dir else None
 
     def _load_prompts(self, json_path: str) -> List[str]:
         with open(json_path, "r") as f:
             data = json.load(f)
         subjects = data["subjects"]
         templates = data["prompts"]
-        return [p.replace("<subject>", s) for s in subjects for p in templates]
+        prompts = [p.replace("<subject>", s) for s in subjects for p in templates]
+        self.subject_per_prompt = [s for s in subjects for _ in templates]
+        return prompts
+
+    def _load_reference_images(self) -> Dict[str, List[Image.Image]]:
+        reference_images = {}
+        if not self.instance_data_dir or not os.path.exists(self.instance_data_dir):
+            return reference_images
+        
+        from pathlib import Path
+        instance_dir = Path(self.instance_data_dir)
+        
+        for subject in set(self.subject_per_prompt):
+            subject_dir = instance_dir / subject
+            if not subject_dir.exists():
+                subject_dir = instance_dir / subject.replace(" ", "_")
+            if not subject_dir.exists():
+                subject_dir = instance_dir / subject.replace(" ", "-")
+            
+            if subject_dir.exists() and subject_dir.is_dir():
+                image_files = sorted([f for f in subject_dir.iterdir() 
+                                    if f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.jpeg']])
+                ref_images = []
+                for img_path in image_files:
+                    try:
+                        img = Image.open(img_path).convert('RGB')
+                        ref_images.append(img)
+                    except Exception as e:
+                        print(f"Warning: Could not load {img_path}: {e}")
+                if ref_images:
+                    reference_images[subject] = ref_images
+        
+        return reference_images
 
     def _encode_text(self, texts: List[str]) -> torch.Tensor:
         tokens = clip.tokenize(texts).to(self.device)
@@ -103,16 +139,32 @@ class Evaluator:
             clip_t = self._cosine(img_clip, t_feat).mean().item()
             clip_t_scores.append(clip_t)
 
-            if self.num_images > 1:
-                clip_i = F.cosine_similarity(
-                    img_clip[0].unsqueeze(0),
-                    img_clip[1:].mean(dim=0, keepdim=True),
-                ).item()
-                dino_i = F.cosine_similarity(
-                    img_dino[0].unsqueeze(0),
-                    img_dino[1:].mean(dim=0, keepdim=True),
-                ).item()
+            subject = self.subject_per_prompt[idx]
+            if self.reference_images and subject in self.reference_images and len(self.reference_images[subject]) > 0:
+                ref_images = self.reference_images[subject]
+                ref_clip = self._encode_images_clip(ref_images)
+                ref_dino = self._encode_images_dino(ref_images)
+                
+                clip_i_sims = []
+                for gen_feat in img_clip:
+                    sims = F.cosine_similarity(
+                        gen_feat.unsqueeze(0),
+                        ref_clip,
+                        dim=1
+                    )
+                    clip_i_sims.append(sims.max().item())
+                clip_i = np.mean(clip_i_sims)
                 clip_i_scores.append(clip_i)
+                
+                dino_sims = []
+                for gen_feat in img_dino:
+                    sims = F.cosine_similarity(
+                        gen_feat.unsqueeze(0),
+                        ref_dino,
+                        dim=1
+                    )
+                    dino_sims.append(sims.max().item())
+                dino_i = np.mean(dino_sims)
                 dino_scores.append(dino_i)
 
             images[0].save(os.path.join(self.output_dir, f"{idx:04d}.png"))

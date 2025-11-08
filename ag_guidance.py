@@ -46,7 +46,8 @@ def evaluate_ag(
     guidance_scale: float = 2.0,
     cfg_scale: float = 7.5,
     weak_checkpoint_path: str = None,
-    num_images_per_prompt: int = 8,
+    num_images_per_prompt: int = 1,
+    instance_data_dir: str = None,
 ):
     finetuned_pipeline = load_finetuned_pipeline(
         pretrained_model_path, lora_path, device
@@ -67,6 +68,7 @@ def evaluate_ag(
         output_dir=output_dir,
         device=device,
         num_images_per_prompt=num_images_per_prompt,
+        instance_data_dir=instance_data_dir,
     )
 
     def generate_images(prompt):
@@ -96,7 +98,8 @@ def optimize_ag(
     cfg_scale: float = 7.5,
     lambda_range: tuple = (-10.0, 10.0),
     weak_checkpoint_path: str = None,
-    num_images_per_prompt: int = 8,
+    num_images_per_prompt: int = 1,
+    instance_data_dir: str = None,
 ):
     def objective(lambda_val):
         scores = evaluate_ag(
@@ -109,6 +112,7 @@ def optimize_ag(
             cfg_scale=cfg_scale,
             weak_checkpoint_path=weak_checkpoint_path,
             num_images_per_prompt=num_images_per_prompt,
+            instance_data_dir=instance_data_dir,
         )
         dino_score = scores.get("DINO", 0)
         return -dino_score
@@ -127,6 +131,7 @@ def optimize_ag(
         cfg_scale=cfg_scale,
         weak_checkpoint_path=weak_checkpoint_path,
         num_images_per_prompt=num_images_per_prompt,
+        instance_data_dir=instance_data_dir,
     )
 
     return best_lambda, best_scores
@@ -191,7 +196,7 @@ def main():
     parser.add_argument(
         "--num_images_per_prompt",
         type=int,
-        default=8,
+        default=1,
         help="Number of images per prompt",
     )
     parser.add_argument(
@@ -199,6 +204,12 @@ def main():
         type=str,
         default=None,
         help="Path to earlier checkpoint LoRA weights for weak model. If None, uses pretrained model.",
+    )
+    parser.add_argument(
+        "--instance_data_dir",
+        type=str,
+        default=None,
+        help="Directory containing reference images for DINO score calculation",
     )
 
     args = parser.parse_args()
@@ -217,6 +228,7 @@ def main():
             lambda_range=tuple(args.lambda_range),
             weak_checkpoint_path=args.weak_checkpoint_path,
             num_images_per_prompt=args.num_images_per_prompt,
+            instance_data_dir=args.instance_data_dir,
         )
         print(f"\n=== AutoGuidance Optimization Results ===")
         print(f"Best Lambda: {best_lambda:.4f}")
@@ -248,6 +260,7 @@ def main():
             cfg_scale=args.cfg_scale,
             weak_checkpoint_path=args.weak_checkpoint_path,
             num_images_per_prompt=args.num_images_per_prompt,
+            instance_data_dir=args.instance_data_dir,
         )
         print("\n=== AutoGuidance Evaluation Results ===")
         for metric, score in scores.items():

@@ -44,7 +44,8 @@ def evaluate_cfg(
     output_dir: str,
     device: str = "cuda",
     guidance_scale: float = 7.5,
-    num_images_per_prompt: int = 8,
+    num_images_per_prompt: int = 1,
+    instance_data_dir: str = None,
 ):
     finetuned_pipeline = load_finetuned_pipeline(
         pretrained_model_path, lora_path, device
@@ -56,6 +57,7 @@ def evaluate_cfg(
         output_dir=output_dir,
         device=device,
         num_images_per_prompt=num_images_per_prompt,
+        instance_data_dir=instance_data_dir,
     )
 
     def generate_images(prompt):
@@ -82,7 +84,8 @@ def optimize_cfg(
     output_dir: str,
     device: str = "cuda",
     lambda_range: tuple = (-10.0, 10.0),
-    num_images_per_prompt: int = 8,
+    num_images_per_prompt: int = 1,
+    instance_data_dir: str = None,
 ):
     finetuned_pipeline = load_finetuned_pipeline(
         pretrained_model_path, lora_path, device
@@ -97,6 +100,7 @@ def optimize_cfg(
             device=device,
             guidance_scale=lambda_val,
             num_images_per_prompt=num_images_per_prompt,
+            instance_data_dir=instance_data_dir,
         )
         dino_score = scores.get("DINO", 0)
         return -dino_score
@@ -113,6 +117,7 @@ def optimize_cfg(
         device=device,
         guidance_scale=best_lambda,
         num_images_per_prompt=num_images_per_prompt,
+        instance_data_dir=instance_data_dir,
     )
 
     return best_lambda, best_scores
@@ -171,8 +176,14 @@ def main():
     parser.add_argument(
         "--num_images_per_prompt",
         type=int,
-        default=8,
+        default=1,
         help="Number of images per prompt",
+    )
+    parser.add_argument(
+        "--instance_data_dir",
+        type=str,
+        default=None,
+        help="Directory containing reference images for DINO score calculation",
     )
 
     args = parser.parse_args()
@@ -189,6 +200,7 @@ def main():
             device=args.device,
             lambda_range=tuple(args.lambda_range),
             num_images_per_prompt=args.num_images_per_prompt,
+            instance_data_dir=args.instance_data_dir,
         )
         print(f"\n=== CFG Optimization Results ===")
         print(f"Best Lambda: {best_lambda:.4f}")
@@ -216,6 +228,7 @@ def main():
             device=args.device,
             guidance_scale=args.guidance_scale,
             num_images_per_prompt=args.num_images_per_prompt,
+            instance_data_dir=args.instance_data_dir,
         )
         print("\n=== CFG Evaluation Results ===")
         for metric, score in scores.items():

@@ -38,6 +38,7 @@ python cfg_guidance.py \
     --lora_path ./outputs \
     --evaluation_prompts_path evaluation_prompts.json \
     --output_dir ./cfg_outputs \
+    --instance_data_dir /path/to/reference/images \
     --optimize
 ```
 
@@ -48,6 +49,7 @@ python ag_guidance.py \
     --lora_path ./outputs \
     --evaluation_prompts_path evaluation_prompts.json \
     --output_dir ./ag_outputs \
+    --instance_data_dir /path/to/reference/images \
     --cfg_scale 7.5 \
     --lambda_range -10 10 \
     --weak_checkpoint_path ./outputs/checkpoint-500 \
@@ -61,6 +63,7 @@ python bg_guidance.py \
     --lora_path ./outputs \
     --evaluation_prompts_path evaluation_prompts.json \
     --output_dir ./bg_outputs \
+    --instance_data_dir /path/to/reference/images \
     --optimize both
 ```
 
@@ -88,9 +91,9 @@ Optimization uses **DINO score** (subject fidelity) as the objective.
 
 ## Evaluation Metrics
 
-- **DINO**: Subject fidelity (optimization target)
-- **CLIP-I**: Image-to-image consistency
-- **CLIP-T**: Text-to-image alignment
+- **DINO**: Image-to-image similarity between reference and generated images (subject fidelity, optimization target)
+- **CLIP-I**: Image-to-image similarity between reference and generated images using CLIP embeddings
+- **CLIP-T**: Text-to-image similarity using CLIP embeddings (text prompt alignment)
 
 ## Files
 

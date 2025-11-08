@@ -45,7 +45,8 @@ def evaluate_bg(
     device: str = "cuda",
     guidance_scale: float = 7.5,
     omega: float = 0.0,
-    num_images_per_prompt: int = 8,
+    num_images_per_prompt: int = 1,
+    instance_data_dir: str = None,
 ):
     pretrained_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
     finetuned_pipeline = load_finetuned_pipeline(
@@ -59,6 +60,7 @@ def evaluate_bg(
         output_dir=output_dir,
         device=device,
         num_images_per_prompt=num_images_per_prompt,
+        instance_data_dir=instance_data_dir,
     )
 
     def generate_images(prompt):
@@ -87,7 +89,8 @@ def optimize_bg_lambda(
     device: str = "cuda",
     lambda_range: tuple = (-10.0, 10.0),
     omega: float = 0.0,
-    num_images_per_prompt: int = 8,
+    num_images_per_prompt: int = 1,
+    instance_data_dir: str = None,
 ):
     pretrained_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
     finetuned_pipeline = load_finetuned_pipeline(
@@ -105,6 +108,7 @@ def optimize_bg_lambda(
             guidance_scale=lambda_val,
             omega=omega,
             num_images_per_prompt=num_images_per_prompt,
+            instance_data_dir=instance_data_dir,
         )
         dino_score = scores.get("DINO", 0)
         return -dino_score
@@ -122,6 +126,7 @@ def optimize_bg_lambda(
         guidance_scale=best_lambda,
         omega=omega,
         num_images_per_prompt=num_images_per_prompt,
+        instance_data_dir=instance_data_dir,
     )
 
     return best_lambda, best_scores
@@ -135,7 +140,8 @@ def optimize_bg_omega(
     device: str = "cuda",
     guidance_scale: float = 7.5,
     omega_range: tuple = (0.0, 1.0),
-    num_images_per_prompt: int = 8,
+    num_images_per_prompt: int = 1,
+    instance_data_dir: str = None,
 ):
     pretrained_pipeline = load_pretrained_pipeline(pretrained_model_path, device)
     finetuned_pipeline = load_finetuned_pipeline(
@@ -159,6 +165,7 @@ def optimize_bg_omega(
             guidance_scale=guidance_scale,
             omega=omega_val,
             num_images_per_prompt=num_images_per_prompt,
+            instance_data_dir=instance_data_dir,
         )
         dino_score = scores.get("DINO", 0)
         all_results[omega_val] = scores
@@ -178,6 +185,7 @@ def optimize_bg_omega(
         guidance_scale=guidance_scale,
         omega=best_omega,
         num_images_per_prompt=num_images_per_prompt,
+        instance_data_dir=instance_data_dir,
     )
 
     return best_omega, best_scores
@@ -191,7 +199,8 @@ def optimize_bg_both(
     device: str = "cuda",
     lambda_range: tuple = (-10.0, 10.0),
     omega_range: tuple = (0.0, 1.0),
-    num_images_per_prompt: int = 8,
+    num_images_per_prompt: int = 1,
+    instance_data_dir: str = None,
 ):
     print("Optimizing lambda first...")
     best_lambda, _ = optimize_bg_lambda(
@@ -203,6 +212,7 @@ def optimize_bg_both(
         lambda_range=lambda_range,
         omega=0.0,
         num_images_per_prompt=num_images_per_prompt,
+        instance_data_dir=instance_data_dir,
     )
 
     print(f"Best lambda: {best_lambda:.4f}")
@@ -216,6 +226,7 @@ def optimize_bg_both(
         guidance_scale=best_lambda,
         omega_range=omega_range,
         num_images_per_prompt=num_images_per_prompt,
+        instance_data_dir=instance_data_dir,
     )
 
     return best_lambda, best_omega, best_scores
@@ -289,8 +300,14 @@ def main():
     parser.add_argument(
         "--num_images_per_prompt",
         type=int,
-        default=8,
+        default=1,
         help="Number of images per prompt",
+    )
+    parser.add_argument(
+        "--instance_data_dir",
+        type=str,
+        default=None,
+        help="Directory containing reference images for DINO score calculation",
     )
 
     args = parser.parse_args()
@@ -308,6 +325,7 @@ def main():
             lambda_range=tuple(args.lambda_range),
             omega=args.omega,
             num_images_per_prompt=args.num_images_per_prompt,
+            instance_data_dir=args.instance_data_dir,
         )
         print(f"\n=== BG Lambda Optimization Results ===")
         print(f"Best Lambda: {best_lambda:.4f}")
@@ -339,6 +357,7 @@ def main():
             guidance_scale=args.guidance_scale,
             omega_range=tuple(args.omega_range),
             num_images_per_prompt=args.num_images_per_prompt,
+            instance_data_dir=args.instance_data_dir,
         )
         print(f"\n=== BG Omega Optimization Results ===")
         print(f"Lambda: {args.guidance_scale:.4f}")
@@ -370,6 +389,7 @@ def main():
             lambda_range=tuple(args.lambda_range),
             omega_range=tuple(args.omega_range),
             num_images_per_prompt=args.num_images_per_prompt,
+            instance_data_dir=args.instance_data_dir,
         )
         print(f"\n=== BG Full Optimization Results ===")
         print(f"Best Lambda: {best_lambda:.4f}")
@@ -401,6 +421,7 @@ def main():
             guidance_scale=args.guidance_scale,
             omega=args.omega,
             num_images_per_prompt=args.num_images_per_prompt,
+            instance_data_dir=args.instance_data_dir,
         )
         print("\n=== BG Evaluation Results ===")
         for metric, score in scores.items():
