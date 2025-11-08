@@ -44,6 +44,7 @@ def evaluate_ag(
     output_dir: str,
     device: str = "cuda",
     guidance_scale: float = 2.0,
+    cfg_scale: float = 7.5,
     weak_checkpoint_path: str = None,
     num_images_per_prompt: int = 8,
 ):
@@ -73,6 +74,7 @@ def evaluate_ag(
             prompt=prompt,
             guidance_method="ag",
             guidance_scale=guidance_scale,
+            cfg_scale=cfg_scale,
             num_inference_steps=50,
             num_images_per_prompt=num_images_per_prompt,
         )
@@ -92,6 +94,7 @@ def optimize_ag(
     output_dir: str,
     device: str = "cuda",
     lambda_range: tuple = (1.0, 5.0),
+    cfg_scale: float = 7.5,
     weak_checkpoint_path: str = None,
     num_images_per_prompt: int = 8,
 ):
@@ -103,6 +106,7 @@ def optimize_ag(
             output_dir=os.path.join(output_dir, f"temp_ag_{lambda_val}"),
             device=device,
             guidance_scale=lambda_val,
+            cfg_scale=cfg_scale,
             weak_checkpoint_path=weak_checkpoint_path,
             num_images_per_prompt=num_images_per_prompt,
         )
@@ -120,6 +124,7 @@ def optimize_ag(
         output_dir=os.path.join(output_dir, "ag_optimized"),
         device=device,
         guidance_scale=best_lambda,
+        cfg_scale=cfg_scale,
         weak_checkpoint_path=weak_checkpoint_path,
         num_images_per_prompt=num_images_per_prompt,
     )
@@ -163,12 +168,18 @@ def main():
         "--guidance_scale",
         type=float,
         default=2.0,
-        help="Guidance scale",
+        help="AG guidance scale",
+    )
+    parser.add_argument(
+        "--cfg_scale",
+        type=float,
+        default=7.5,
+        help="CFG guidance scale",
     )
     parser.add_argument(
         "--optimize",
         action="store_true",
-        help="Optimize guidance scale using golden search",
+        help="Optimize AG guidance scale using golden search",
     )
     parser.add_argument(
         "--lambda_range",
@@ -203,6 +214,7 @@ def main():
             output_dir=args.output_dir,
             device=args.device,
             lambda_range=tuple(args.lambda_range),
+            cfg_scale=args.cfg_scale,
             weak_checkpoint_path=args.weak_checkpoint_path,
             num_images_per_prompt=args.num_images_per_prompt,
         )
@@ -231,6 +243,7 @@ def main():
             output_dir=args.output_dir,
             device=args.device,
             guidance_scale=args.guidance_scale,
+            cfg_scale=args.cfg_scale,
             weak_checkpoint_path=args.weak_checkpoint_path,
             num_images_per_prompt=args.num_images_per_prompt,
         )

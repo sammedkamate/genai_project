@@ -73,6 +73,7 @@ class GuidancePipeline(StableDiffusionPipeline):
         timestep: torch.Tensor,
         prompt_embeds: torch.Tensor,
         guidance_scale: float = 2.0,
+        cfg_scale: float = 7.5,
     ) -> torch.Tensor:
         if self.weak_unet is None:
             if self.pretrained_unet is None:
@@ -81,20 +82,43 @@ class GuidancePipeline(StableDiffusionPipeline):
         else:
             weak_unet = self.weak_unet
         
-        weak_noise_pred = weak_unet(
+        batch_size = latents.shape[0]
+        uncond_embeds = self._get_unconditional_embeddings(batch_size, latents.device)
+        
+        weak_uncond_pred = weak_unet(
+            latents,
+            timestep,
+            encoder_hidden_states=uncond_embeds,
+        ).sample
+        
+        weak_cond_pred = weak_unet(
             latents,
             timestep,
             encoder_hidden_states=prompt_embeds,
         ).sample
         
-        fine_noise_pred = self.unet(
+        weak_cfg_pred = weak_uncond_pred + cfg_scale * (
+            weak_cond_pred - weak_uncond_pred
+        )
+        
+        fine_uncond_pred = self.unet(
+            latents,
+            timestep,
+            encoder_hidden_states=uncond_embeds,
+        ).sample
+        
+        fine_cond_pred = self.unet(
             latents,
             timestep,
             encoder_hidden_states=prompt_embeds,
         ).sample
         
-        noise_pred = weak_noise_pred + guidance_scale * (
-            fine_noise_pred - weak_noise_pred
+        fine_cfg_pred = fine_uncond_pred + cfg_scale * (
+            fine_cond_pred - fine_uncond_pred
+        )
+        
+        noise_pred = weak_cfg_pred + guidance_scale * (
+            fine_cfg_pred - weak_cfg_pred
         )
         return noise_pred
 
@@ -172,6 +196,7 @@ class GuidancePipeline(StableDiffusionPipeline):
         guidance_method: str = "cfg",
         guidance_scale: float = 7.5,
         omega: float = 0.0,
+        cfg_scale: float = 7.5,
         num_inference_steps: int = 50,
         height: int = 512,
         width: int = 512,
@@ -236,6 +261,7 @@ class GuidancePipeline(StableDiffusionPipeline):
                     t,
                     cond_embeds,
                     guidance_scale=guidance_scale,
+                    cfg_scale=cfg_scale,
                 )
             elif guidance_method == "bg":
                 latent_model_input = self.scheduler.scale_model_input(latents, t)

@@ -41,13 +41,16 @@ python cfg_guidance.py \
     --optimize
 ```
 
-### AutoGuidance
+### AutoGuidance (CFG + AG)
 
 ```bash
 python ag_guidance.py \
     --lora_path ./outputs \
     --evaluation_prompts_path evaluation_prompts.json \
     --output_dir ./ag_outputs \
+    --cfg_scale 7.5 \
+    --guidance_scale 2.0 \
+    --weak_checkpoint_path ./outputs/checkpoint-500 \
     --optimize
 ```
 
@@ -61,19 +64,32 @@ python bg_guidance.py \
     --optimize both
 ```
 
+## Guidance Methods
+
+- **CFG**: Classifier-Free Guidance (Equation 5)
+- **AG**: CFG + AutoGuidance combination (Equation 6 with CFG)
+- **BG**: Personalization Guidance with weight interpolation (Equations 7 & 9)
+
 ## Optimization
 
 All guidance methods use golden section search to optimize parameters based on **DINO score** (subject fidelity).
 
 - CFG: Optimizes `--guidance_scale` (lambda)
-- AG: Optimizes `--guidance_scale` (lambda)
+- AG: Optimizes `--guidance_scale` (AG lambda), uses fixed `--cfg_scale` (CFG lambda)
 - BG: Optimizes `--guidance_scale` (lambda) and `--omega` (weight interpolation)
+
+## Parameters
+
+- `--guidance_scale`: Guidance strength (lambda)
+- `--cfg_scale`: CFG scale for AG method (default: 7.5)
+- `--omega`: Weight interpolation parameter for BG (0.0-1.0)
+- `--weak_checkpoint_path`: Earlier checkpoint for AG weak model (optional)
 
 ## Files
 
 - `train_dreambooth_lora.py`: LoRA training with prior-preservation
 - `cfg_guidance.py`: CFG evaluation and optimization
-- `ag_guidance.py`: AutoGuidance evaluation and optimization
+- `ag_guidance.py`: CFG + AG evaluation and optimization
 - `bg_guidance.py`: Bhavik Guidance evaluation and optimization
 - `guidance_methods.py`: Core guidance implementations
 - `golden_search.py`: Golden section search optimization
