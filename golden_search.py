@@ -132,7 +132,7 @@ class ParameterOptimizer:
     ) -> Tuple[float, dict]:
         def objective(omega_val):
             scores = self.evaluate_guidance(
-                guidance_method="bg",
+                guidance_method="wig",
                 guidance_scale=lambda_val,
                 omega=omega_val,
             )
@@ -144,7 +144,7 @@ class ParameterOptimizer:
         )
 
         best_scores = self.evaluate_guidance(
-            guidance_method="bg",
+            guidance_method="wig",
             guidance_scale=lambda_val,
             omega=best_omega,
         )
@@ -158,9 +158,9 @@ class ParameterOptimizer:
     ) -> dict:
         results = {}
 
-        for method in ["cfg", "ag", "bg"]:
+        for method in ["cfg", "ag", "wig"]:
             print(f"Optimizing {method.upper()}...")
-            if method == "bg":
+            if method == "wig":
                 best_lambda, lambda_scores = self.optimize_lambda(
                     method, lambda_range, omega=0.0
                 )

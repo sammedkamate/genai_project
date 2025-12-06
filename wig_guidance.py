@@ -40,7 +40,7 @@ def load_finetuned_pipeline(
     return pipeline
 
 
-def evaluate_bg(
+def evaluate_wig(
     pretrained_model_path: str,
     lora_base_dir: str,
     evaluation_prompts_path: str,
@@ -96,7 +96,7 @@ def evaluate_bg(
         def generate_images(p):
             result = current_pipeline.generate_with_guidance(
                 prompt=p,
-                guidance_method="bg",
+                guidance_method="wig",
                 guidance_scale=guidance_scale,
                 omega=omega,
                 num_inference_steps=50,
@@ -173,7 +173,7 @@ def evaluate_bg(
     }
 
 
-def optimize_bg_lambda(
+def optimize_wig_lambda(
     pretrained_model_path: str,
     lora_base_dir: str,
     evaluation_prompts_path: str,
@@ -189,7 +189,7 @@ def optimize_bg_lambda(
             pretrained_model_path=pretrained_model_path,
             lora_base_dir=lora_base_dir,
             evaluation_prompts_path=evaluation_prompts_path,
-            output_dir=os.path.join(output_dir, f"temp_bg_lambda_{lambda_val}"),
+            output_dir=os.path.join(output_dir, f"temp_wig_lambda_{lambda_val}"),
             device=device,
             guidance_scale=lambda_val,
             omega=omega,
@@ -207,7 +207,7 @@ def optimize_bg_lambda(
         pretrained_model_path=pretrained_model_path,
         lora_base_dir=lora_base_dir,
         evaluation_prompts_path=evaluation_prompts_path,
-        output_dir=os.path.join(output_dir, "bg_optimized_lambda"),
+        output_dir=os.path.join(output_dir, "wig_optimized_lambda"),
         device=device,
         guidance_scale=best_lambda,
         omega=omega,
@@ -218,7 +218,7 @@ def optimize_bg_lambda(
     return best_lambda, best_scores
 
 
-def optimize_bg_omega(
+def optimize_wig_omega(
     pretrained_model_path: str,
     lora_base_dir: str,
     evaluation_prompts_path: str,
@@ -240,7 +240,7 @@ def optimize_bg_omega(
             pretrained_model_path=pretrained_model_path,
             lora_base_dir=lora_base_dir,
             evaluation_prompts_path=evaluation_prompts_path,
-            output_dir=os.path.join(output_dir, f"temp_bg_omega_{omega_val}"),
+            output_dir=os.path.join(output_dir, f"temp_wig_omega_{omega_val}"),
             device=device,
             guidance_scale=guidance_scale,
             omega=omega_val,
@@ -260,7 +260,7 @@ def optimize_bg_omega(
         pretrained_model_path=pretrained_model_path,
         lora_base_dir=lora_base_dir,
         evaluation_prompts_path=evaluation_prompts_path,
-        output_dir=os.path.join(output_dir, "bg_optimized_omega"),
+        output_dir=os.path.join(output_dir, "wig_optimized_omega"),
         device=device,
         guidance_scale=guidance_scale,
         omega=best_omega,
@@ -271,7 +271,7 @@ def optimize_bg_omega(
     return best_omega, best_scores
 
 
-def optimize_bg_both(
+def optimize_wig_both(
     pretrained_model_path: str,
     lora_base_dir: str,
     evaluation_prompts_path: str,
@@ -283,7 +283,7 @@ def optimize_bg_both(
     instance_data_dir: str = None,
 ):
     print("Optimizing lambda first...")
-    best_lambda, _ = optimize_bg_lambda(
+    best_lambda, _ = optimize_wig_lambda(
         pretrained_model_path=pretrained_model_path,
         lora_base_dir=lora_base_dir,
         evaluation_prompts_path=evaluation_prompts_path,
@@ -297,7 +297,7 @@ def optimize_bg_both(
 
     print(f"Best lambda: {best_lambda:.4f}")
     print("Optimizing omega...")
-    best_omega, best_scores = optimize_bg_omega(
+    best_omega, best_scores = optimize_wig_omega(
         pretrained_model_path=pretrained_model_path,
         lora_base_dir=lora_base_dir,
         evaluation_prompts_path=evaluation_prompts_path,
@@ -313,7 +313,7 @@ def optimize_bg_both(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Bhavik Guidance Evaluation")
+    parser = argparse.ArgumentParser(description="Weight Interpolation Guidance (WIG) Evaluation")
     parser.add_argument(
         "--pretrained_model_path",
         type=str,
@@ -335,7 +335,7 @@ def main():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="bg_outputs",
+        default="wig_outputs",
         help="Output directory",
     )
     parser.add_argument(
@@ -395,8 +395,8 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.optimize == "lambda":
-        print("Optimizing BG lambda...")
-        best_lambda, scores = optimize_bg_lambda(
+        print("Optimizing WIG lambda...")
+        best_lambda, scores = optimize_wig_lambda(
             pretrained_model_path=args.pretrained_model_path,
             lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
@@ -407,7 +407,7 @@ def main():
             num_images_per_prompt=args.num_images_per_prompt,
             instance_data_dir=args.instance_data_dir,
         )
-        print(f"\n=== BG Lambda Optimization Results ===")
+        print(f"\n=== WIG Lambda Optimization Results ===")
         print(f"Best Lambda: {best_lambda:.4f}")
         print(f"Omega: {args.omega:.4f}")
         print(f"Scores:")
@@ -416,19 +416,19 @@ def main():
                 print(f"  {metric}: {score:.4f}")
 
         results = {
-            "method": "bg",
+            "method": "wig",
             "lambda": best_lambda,
             "omega": args.omega,
             "scores": scores,
         }
-        results_path = os.path.join(args.output_dir, "bg_lambda_optimization_results.json")
+        results_path = os.path.join(args.output_dir, "wig_lambda_optimization_results.json")
         with open(results_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to {results_path}")
 
     elif args.optimize == "omega":
-        print("Optimizing BG omega...")
-        best_omega, scores = optimize_bg_omega(
+        print("Optimizing WIG omega...")
+        best_omega, scores = optimize_wig_omega(
             pretrained_model_path=args.pretrained_model_path,
             lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
@@ -439,7 +439,7 @@ def main():
             num_images_per_prompt=args.num_images_per_prompt,
             instance_data_dir=args.instance_data_dir,
         )
-        print(f"\n=== BG Omega Optimization Results ===")
+        print(f"\n=== WIG Omega Optimization Results ===")
         print(f"Lambda: {args.guidance_scale:.4f}")
         print(f"Best Omega: {best_omega:.4f}")
         print(f"Scores:")
@@ -448,19 +448,19 @@ def main():
                 print(f"  {metric}: {score:.4f}")
 
         results = {
-            "method": "bg",
+            "method": "wig",
             "lambda": args.guidance_scale,
             "omega": best_omega,
             "scores": scores,
         }
-        results_path = os.path.join(args.output_dir, "bg_omega_optimization_results.json")
+        results_path = os.path.join(args.output_dir, "wig_omega_optimization_results.json")
         with open(results_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to {results_path}")
 
     elif args.optimize == "both":
-        print("Optimizing BG lambda and omega...")
-        best_lambda, best_omega, scores = optimize_bg_both(
+        print("Optimizing WIG lambda and omega...")
+        best_lambda, best_omega, scores = optimize_wig_both(
             pretrained_model_path=args.pretrained_model_path,
             lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
@@ -471,7 +471,7 @@ def main():
             num_images_per_prompt=args.num_images_per_prompt,
             instance_data_dir=args.instance_data_dir,
         )
-        print(f"\n=== BG Full Optimization Results ===")
+        print(f"\n=== WIG Full Optimization Results ===")
         print(f"Best Lambda: {best_lambda:.4f}")
         print(f"Best Omega: {best_omega:.4f}")
         print(f"Scores:")
@@ -480,19 +480,19 @@ def main():
                 print(f"  {metric}: {score:.4f}")
 
         results = {
-            "method": "bg",
+            "method": "wig",
             "lambda": best_lambda,
             "omega": best_omega,
             "scores": scores,
         }
-        results_path = os.path.join(args.output_dir, "bg_full_optimization_results.json")
+        results_path = os.path.join(args.output_dir, "wig_full_optimization_results.json")
         with open(results_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to {results_path}")
 
     else:
-        print(f"Evaluating BG with guidance_scale={args.guidance_scale}, omega={args.omega}...")
-        scores = evaluate_bg(
+        print(f"Evaluating WIG with guidance_scale={args.guidance_scale}, omega={args.omega}...")
+        scores = evaluate_wig(
             pretrained_model_path=args.pretrained_model_path,
             lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
@@ -503,7 +503,7 @@ def main():
             num_images_per_prompt=args.num_images_per_prompt,
             instance_data_dir=args.instance_data_dir,
         )
-        print("\n=== BG Evaluation Results ===")
+        print("\n=== WIG Evaluation Results ===")
         for metric, score in scores.items():
             if score is not None:
                 print(f"{metric}: {score:.4f}")

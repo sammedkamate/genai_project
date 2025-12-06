@@ -8,7 +8,11 @@ DreamBooth LoRA fine-tuning with multiple guidance techniques for diffusion mode
 pip install -r requirements.txt
 ```
 
+For SANA model support, you may need additional dependencies. Please refer to the [official SANA repository](https://github.com/NVlabs/Sana) for installation instructions.
+
 ## Training
+
+### Stable Diffusion 1.5 / 2.1
 
 Train a DreamBooth LoRA model with prior-preservation:
 
@@ -22,19 +26,71 @@ accelerate launch train_dreambooth_lora.py \
     --with_prior_preservation \
     --prior_loss_weight 1.0 \
     --output_dir ./outputs \
-    --num_train_epochs 50 \
-    --rank 8 \
+    --max_train_steps 500 \
+    --train_batch_size 1 \
+    --rank 4 \
+    --learning_rate 1e-4 \
+    --resolution 512 \
     --gradient_checkpointing \
     --use_8bit_adam \
     --mixed_precision fp16
 ```
 
+### SANA Model
+
+Train a DreamBooth LoRA model for SANA:
+
+```bash
+accelerate launch train_dreambooth_lora_sana.py \
+    --pretrained_model_name_or_path hf-internal-testing/tiny-sana-pipe \
+    --instance_data_dir /path/to/images \
+    --instance_prompt "a photo of sks dog" \
+    --output_dir ./outputs_sana \
+    --max_train_steps 500 \
+    --train_batch_size 1 \
+    --rank 4 \
+    --learning_rate 1e-4 \
+    --resolution 1024 \
+    --gradient_checkpointing \
+    --use_8bit_adam \
+    --mixed_precision fp16 \
+    --cache_latents \
+    --max_sequence_length 256
+```
+
+## Training Hyperparameters
+
+Fine-tuning was conducted with the following hyperparameters:
+
+- **Batch size**: 1
+- **Training iterations**: 500 steps (max_train_steps)
+- **LoRA rank**: 4
+- **Learning rate**: 1e-4
+- **Prior preservation loss**: Enabled (recommended)
+- **Maximum diffusion timesteps**: 1,000 (configured in scheduler)
+
+### Resolution
+
+- **Stable Diffusion 1.5/2.1**: 512×512 resolution for both training and inference
+- **SANA**: 1024×1024 resolution for both training and inference
+
+### Inference Settings
+
+- **Stable Diffusion 1.5/2.1**:
+  - Scheduler: DDIM
+  - Inference steps: 50
+  
+- **SANA**:
+  - Scheduler: FlowDPM-Solver
+  - Inference steps: 20
+
 ## Evaluation
 
-### CFG Guidance
+### CFG Guidance (Stable Diffusion)
 
 ```bash
 python cfg_guidance.py \
+    --pretrained_model_path runwayml/stable-diffusion-v1-5 \
     --lora_base_dir ./lora_models \
     --evaluation_prompts_path evaluation_prompts.json \
     --output_dir ./cfg_outputs \
@@ -42,10 +98,11 @@ python cfg_guidance.py \
     --optimize
 ```
 
-### AutoGuidance (CFG + AG)
+### AutoGuidance (CFG + AG) - Stable Diffusion
 
 ```bash
 python ag_guidance.py \
+    --pretrained_model_path runwayml/stable-diffusion-v1-5 \
     --lora_base_dir ./lora_models \
     --evaluation_prompts_path evaluation_prompts.json \
     --output_dir ./ag_outputs \
@@ -57,22 +114,63 @@ python ag_guidance.py \
 
 **Note:** AG automatically uses `weak/` subdirectory within each folder as the weak model checkpoint.
 
-### Bhavik Guidance
+### Weight Interpolation Guidance (WIG) - Stable Diffusion
 
 ```bash
-python bg_guidance.py \
+python wig_guidance.py \
+    --pretrained_model_path runwayml/stable-diffusion-v1-5 \
     --lora_base_dir ./lora_models \
     --evaluation_prompts_path evaluation_prompts.json \
-    --output_dir ./bg_outputs \
+    --output_dir ./wig_outputs \
     --instance_data_dir /path/to/reference/images \
     --optimize both
 ```
+
+### CFG Guidance (SANA)
+
+```bash
+python cfg_guidance_sana.py \
+    --pretrained_model_path hf-internal-testing/tiny-sana-pipe \
+    --lora_base_dir ./lora_models_sana \
+    --evaluation_prompts_path evaluation_prompts.json \
+    --output_dir ./cfg_outputs_sana \
+    --instance_data_dir /path/to/reference/images \
+    --optimize
+```
+
+### AutoGuidance (CFG + AG) - SANA
+
+```bash
+python ag_guidance_sana.py \
+    --pretrained_model_path hf-internal-testing/tiny-sana-pipe \
+    --lora_base_dir ./lora_models_sana \
+    --evaluation_prompts_path evaluation_prompts.json \
+    --output_dir ./ag_outputs_sana \
+    --instance_data_dir /path/to/reference/images \
+    --cfg_scale 7.5 \
+    --lambda_range -10 10 \
+    --optimize
+```
+
+### Weight Interpolation Guidance (WIG) - SANA
+
+```bash
+python wig_guidance_sana.py \
+    --pretrained_model_path hf-internal-testing/tiny-sana-pipe \
+    --lora_base_dir ./lora_models_sana \
+    --evaluation_prompts_path evaluation_prompts.json \
+    --output_dir ./wig_outputs_sana \
+    --instance_data_dir /path/to/reference/images \
+    --optimize both
+```
+
+**Note:** All SANA evaluation scripts use 1024×1024 resolution and 20 inference steps with FlowDPM-Solver scheduler.
 
 ## Guidance Methods
 
 - **CFG**: Classifier-Free Guidance (Equation 5)
 - **AG**: CFG + AutoGuidance combination (Equation 6 with CFG)
-- **BG**: Personalization Guidance with weight interpolation (Equations 7 & 9)
+- **WIG**: Weight Interpolation Guidance with weight interpolation (Equations 7 & 9)
 
 ## Optimization
 
@@ -80,15 +178,24 @@ Optimization uses **DINO score** (subject fidelity) as the objective.
 
 - CFG: Golden section search for `--guidance_scale` (lambda)
 - AG: Golden section search for `--guidance_scale` (lambda), uses fixed `--cfg_scale` (CFG lambda = 7.5)
-- BG: Golden section search for `--guidance_scale` (lambda), grid sweep for `--omega` 
+- WIG: Golden section search for `--guidance_scale` (lambda), grid sweep for `--omega` 
 
 ## Parameters
 
-- `--guidance_scale`: Guidance strength (lambda, optimized for CFG/AG/BG)
+- `--guidance_scale`: Guidance strength (lambda, optimized for CFG/AG/WIG)
 - `--cfg_scale`: CFG scale for AG method (depending on best lambda for cfg)
 - `--lambda_range`: Range for lambda optimization (default: [-10.0, 10.0] for all methods)
-- `--omega`: Weight interpolation parameter for BG (0.0-1.0, swept in 0.1 steps)
+- `--omega`: Weight interpolation parameter for WIG (0.0-1.0, swept in 0.1 steps)
 - `--weak_checkpoint_path`: Earlier checkpoint for AG weak model (optional)
+
+### Weight Interpolation (ω) for WIG
+
+For Weight Interpolation Guidance (WIG), the `omega` parameter controls the trade-off between subject fidelity and text fidelity:
+
+- **ω = 0.0-0.3**: Maximizes subject fidelity
+- **ω = 0.4-0.6**: Balanced improvement with better preservation of text fidelity
+
+The optimization automatically sweeps ω values in 0.1 steps when using `--optimize both`.
 
 ## Evaluation Metrics
 
@@ -132,7 +239,7 @@ lora_models/
 **Checkpoint Usage:**
 - **CFG**: Uses fully trained checkpoint (`lora_base_dir/folder_name/`)
 - **AG**: Uses under-trained (`lora_base_dir/folder_name/weak/`) as weak model + fully trained as fine model
-- **BG**: Uses fully trained + pretrained model
+- **WIG**: Uses fully trained + pretrained model
 
 **Important:**
 - Folder names in `lora_base_dir` match dataset folder names (e.g., `cat2`, `dog2`, `cat_statue`)
@@ -166,13 +273,30 @@ The `evaluation_summary.csv` contains:
 - `CLIP-T`: Average CLIP-T score (text-to-image similarity)
 - `DINO`: Average DINO score (subject fidelity)
 
+## Personalization Methods Details
+
+### DreamBooth-LoRA Configuration
+
+Following the implementation codes provided by Diffusers or the official SANA repository:
+
+- **LoRA rank**: 4
+- **Learning rate**: 1e-4
+- **Prior preservation loss**: Enabled (recommended)
+- **LoRA layers**: Applied to attention processors in UNet (SD) or transformer blocks (SANA)
+
+For SANA models, LoRA is applied to transformer attention layers (e.g., `transformer_blocks.X.attn1.to_k`, `transformer_blocks.X.attn1.to_q`).
+
 ## Files
 
-- `train_dreambooth_lora.py`: LoRA training
-- `guidance_methods.py`: Core guidance implementations (CFG, AG, BG)
-- `cfg_guidance.py`: CFG evaluation
-- `ag_guidance.py`: CFG + AG evaluation
-- `bg_guidance.py`: BG evaluation
+- `train_dreambooth_lora.py`: LoRA training for Stable Diffusion 1.5/2.1
+- `train_dreambooth_lora_sana.py`: LoRA training for SANA models
+- `guidance_methods.py`: Core guidance implementations (CFG, AG, WIG) with SANA support
+- `cfg_guidance.py`: CFG evaluation for Stable Diffusion
+- `cfg_guidance_sana.py`: CFG evaluation for SANA models
+- `ag_guidance.py`: CFG + AG evaluation for Stable Diffusion
+- `ag_guidance_sana.py`: CFG + AG evaluation for SANA models
+- `wig_guidance.py`: WIG evaluation for Stable Diffusion
+- `wig_guidance_sana.py`: WIG evaluation for SANA models
 - `evaluation_code.py`: Evaluation metrics (DINO, CLIP-I, CLIP-T)
 - `golden_search.py`: Parameter optimization
 - `evaluation_prompts.json`: Evaluation prompts

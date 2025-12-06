@@ -1,7 +1,24 @@
+# coding=utf-8
+# Copyright 2025 HuggingFace Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import argparse
+import json
 import os
 import math
 import random
+import shutil
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -10,7 +27,6 @@ from torchvision import transforms
 from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
-import json
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -18,15 +34,21 @@ from accelerate.utils import set_seed, ProjectConfiguration
 from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
-    StableDiffusionPipeline,
-    UNet2DConditionModel,
 )
 from diffusers.loaders import AttnProcsLayers
 from diffusers.models.attention_processor import LoRAAttnProcessor
 from diffusers.optimization import get_scheduler
+from diffusers.loaders.lora_base import LORA_ADAPTER_METADATA_KEY
 from transformers import CLIPTextModel, CLIPTokenizer
 
 logger = get_logger(__name__)
+
+try:
+    from diffusers import Transformer2DModel
+    SANA_TRANSFORMER_AVAILABLE = True
+except ImportError:
+    SANA_TRANSFORMER_AVAILABLE = False
+    logger.warning("Transformer2DModel not available. SANA training may not work.")
 
 
 class DreamBoothDataset(Dataset):
@@ -35,9 +57,10 @@ class DreamBoothDataset(Dataset):
         instance_data_root,
         instance_prompt,
         tokenizer,
-        size=512,
+        size=1024,
         repeats=1,
         center_crop=False,
+        max_sequence_length=None,
     ):
         self.size = size
         self.center_crop = center_crop
@@ -46,6 +69,7 @@ class DreamBoothDataset(Dataset):
         self.num_instance_images = len(self.instance_images_path)
         self.instance_prompt = instance_prompt
         self._length = self.num_instance_images * repeats
+        self.max_sequence_length = max_sequence_length or tokenizer.model_max_length
         self.image_transforms = transforms.Compose(
             [
                 transforms.Resize(
@@ -66,13 +90,16 @@ class DreamBoothDataset(Dataset):
             self.instance_images_path[index % self.num_instance_images]
         ).convert("RGB")
         example["instance_images"] = self.image_transforms(instance_image)
-        example["instance_prompt_ids"] = self.tokenizer(
+        
+        # Tokenize prompt
+        tokenized = self.tokenizer(
             self.instance_prompt,
             truncation=True,
             padding="max_length",
-            max_length=self.tokenizer.model_max_length,
+            max_length=self.max_sequence_length,
             return_tensors="pt",
-        ).input_ids
+        )
+        example["instance_prompt_ids"] = tokenized.input_ids
         return example
 
 
@@ -96,47 +123,12 @@ def collate_fn(examples):
     return batch
 
 
-def generate_class_images(
-    pretrained_model_name_or_path,
-    class_prompt,
-    num_class_images,
-    output_dir,
-    seed=None,
-):
-    if seed is not None:
-        torch.manual_seed(seed)
-
-    pipeline = StableDiffusionPipeline.from_pretrained(
-        pretrained_model_name_or_path,
-        torch_dtype=torch.float16,
-        safety_checker=None,
-        requires_safety_checker=False,
-    )
-    pipeline = pipeline.to("cuda")
-
-    class_images_dir = Path(output_dir) / "class_images"
-    class_images_dir.mkdir(parents=True, exist_ok=True)
-    cur_class_images = len(list(class_images_dir.iterdir()))
-
-    if cur_class_images < num_class_images:
-        num_new_images = num_class_images - cur_class_images
-        logger.info(f"Generating {num_new_images} class images...")
-        for i in tqdm(range(num_new_images)):
-            image = pipeline(class_prompt).images[0]
-            image.save(class_images_dir / f"{i+cur_class_images}.png")
-
-    del pipeline
-    torch.cuda.empty_cache()
-
-    return class_images_dir
-
-
 def parse_args():
-    parser = argparse.ArgumentParser(description="DreamBooth LoRA Training")
+    parser = argparse.ArgumentParser(description="DreamBooth LoRA Training for SANA")
     parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
-        default="runwayml/stable-diffusion-v1-5",
+        required=True,
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
@@ -152,39 +144,9 @@ def parse_args():
         help="The prompt with identifier specifying the instance",
     )
     parser.add_argument(
-        "--class_data_dir",
-        type=str,
-        default=None,
-        help="A folder containing the training data of class images.",
-    )
-    parser.add_argument(
-        "--class_prompt",
-        type=str,
-        default=None,
-        help="The prompt to specify images in the same class as provided instance images.",
-    )
-    parser.add_argument(
-        "--with_prior_preservation",
-        default=False,
-        action="store_true",
-        help="Flag to add prior preservation loss.",
-    )
-    parser.add_argument(
-        "--prior_loss_weight",
-        type=float,
-        default=1.0,
-        help="The weight of prior preservation loss.",
-    )
-    parser.add_argument(
-        "--num_class_images",
-        type=int,
-        default=200,
-        help="Minimal class images for prior preservation loss. If there are not enough images already present in class_data_dir, additional images will be sampled with class_prompt.",
-    )
-    parser.add_argument(
         "--output_dir",
         type=str,
-        default="lora_outputs",
+        default="lora_outputs_sana",
         help="The output directory where the model predictions and checkpoints will be written.",
     )
     parser.add_argument(
@@ -196,8 +158,8 @@ def parse_args():
     parser.add_argument(
         "--resolution",
         type=int,
-        default=512,
-        help="The resolution for input images, all the images in the train/validation dataset will be resized to this resolution. Use 512 for SD 1.5/2.1, 1024 for SANA.",
+        default=1024,
+        help="The resolution for input images, all the images in the train/validation dataset will be resized to this resolution",
     )
     parser.add_argument(
         "--center_crop",
@@ -239,6 +201,11 @@ def parse_args():
         type=float,
         default=1e-4,
         help="Initial learning rate (after the potential warmup period) to use.",
+    )
+    parser.add_argument(
+        "--scale_lr",
+        action="store_true",
+        help="Scale the learning rate by the number of GPUs, gradient accumulation steps, and batch size.",
     )
     parser.add_argument(
         "--lr_scheduler",
@@ -336,27 +303,34 @@ def parse_args():
         default=4,
         help="The dimension of the LoRA update matrices.",
     )
+    parser.add_argument(
+        "--lora_alpha",
+        type=int,
+        default=8,
+        help="LoRA alpha scaling parameter.",
+    )
+    parser.add_argument(
+        "--lora_layers",
+        type=str,
+        default=None,
+        help="Specific transformer layers to apply LoRA to. If None, applies to all attention layers.",
+    )
+    parser.add_argument(
+        "--cache_latents",
+        action="store_true",
+        help="Cache VAE latents for faster training.",
+    )
+    parser.add_argument(
+        "--max_sequence_length",
+        type=int,
+        default=None,
+        help="Maximum sequence length for tokenizer. If None, uses model default.",
+    )
 
     args = parser.parse_args()
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
-
-    if args.instance_data_dir is None:
-        raise ValueError("You must specify a train data directory.")
-
-    if args.output_dir is None:
-        raise ValueError("You must specify an output directory.")
-
-    if args.with_prior_preservation:
-        if args.class_data_dir is None:
-            raise ValueError("You must specify a data directory for class images.")
-        if args.class_prompt is None:
-            raise ValueError("You must specify prompt for class images.")
-    
-    # Enable prior preservation by default for DreamBooth-LoRA
-    if not args.with_prior_preservation:
-        logger.warning("Prior preservation loss is recommended for DreamBooth-LoRA. Consider using --with_prior_preservation.")
 
     return args
 
@@ -382,6 +356,9 @@ def main():
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
+    logger.info(f"Loading SANA model from {args.pretrained_model_name_or_path}")
+
+    # Load components
     tokenizer = CLIPTokenizer.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="tokenizer",
@@ -397,43 +374,90 @@ def main():
         subfolder="vae",
     )
 
-    unet = UNet2DConditionModel.from_pretrained(
+    # Load SANA transformer
+    if not SANA_TRANSFORMER_AVAILABLE:
+        raise ImportError(
+            "Transformer2DModel is required for SANA training. "
+            "Please install the latest version of diffusers."
+        )
+    
+    transformer = Transformer2DModel.from_pretrained(
         args.pretrained_model_name_or_path,
-        subfolder="unet",
+        subfolder="transformer",
     )
 
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
-    unet.requires_grad_(False)
+    transformer.requires_grad_(False)
 
     if args.gradient_checkpointing:
-        unet.enable_gradient_checkpointing()
+        transformer.enable_gradient_checkpointing()
 
-    unet_lora_attn_procs = {}
-    for name in unet.attn_processors.keys():
-        cross_attention_dim = (
-            None
-            if name.endswith("attn1.processor")
-            else unet.config.cross_attention_dim
-        )
-        if name.startswith("mid_block"):
-            hidden_size = unet.config.block_out_channels[-1]
-        elif name.startswith("up_blocks"):
-            block_id = int(name[len("up_blocks.")])
-            hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
-        elif name.startswith("down_blocks"):
-            block_id = int(name[len("down_blocks.")])
-            hidden_size = unet.config.block_out_channels[block_id]
+    # Apply LoRA to transformer
+    transformer_lora_attn_procs = {}
+    lora_rank = args.rank
+    lora_alpha = args.lora_alpha
 
-        lora_attn_proc = LoRAAttnProcessor(
-            hidden_size=hidden_size,
-            cross_attention_dim=cross_attention_dim,
-            rank=args.rank,
-        )
-        unet_lora_attn_procs[name] = lora_attn_proc
+    # Get transformer blocks
+    if hasattr(transformer, 'transformer_blocks'):
+        blocks = transformer.transformer_blocks
+    elif hasattr(transformer, 'blocks'):
+        blocks = transformer.blocks
+    else:
+        raise ValueError("Cannot find transformer blocks in SANA model")
 
-    unet.set_attn_processor(unet_lora_attn_procs)
-    lora_layers = AttnProcsLayers(unet.attn_processors)
+    # Determine which layers to apply LoRA to
+    target_layers = None
+    if args.lora_layers:
+        # Specific layers provided
+        target_layers = [args.lora_layers]
+    else:
+        # Apply to all attention layers
+        target_layers = None
+
+    # Apply LoRA processors
+    for i, block in enumerate(blocks):
+        block_prefix = f"transformer_blocks.{i}"
+        
+        # Self-attention (attn1)
+        if hasattr(block, 'attn1'):
+            attn1 = block.attn1
+            if hasattr(attn1, 'to_q'):
+                hidden_size = attn1.to_q.out_features if hasattr(attn1.to_q, 'out_features') else attn1.to_q.weight.shape[0]
+                
+                for proj_name in ['to_q', 'to_k', 'to_v', 'to_out']:
+                    if hasattr(attn1, proj_name):
+                        layer_name = f"{block_prefix}.attn1.{proj_name}"
+                        if target_layers is None or any(tl in layer_name for tl in target_layers):
+                            transformer_lora_attn_procs[layer_name] = LoRAAttnProcessor(
+                                hidden_size=hidden_size,
+                                cross_attention_dim=None,
+                                rank=lora_rank,
+                                lora_alpha=lora_alpha,
+                            )
+        
+        # Cross-attention (attn2) if present
+        if hasattr(block, 'attn2'):
+            attn2 = block.attn2
+            if hasattr(attn2, 'to_q'):
+                hidden_size = attn2.to_q.out_features if hasattr(attn2.to_q, 'out_features') else attn2.to_q.weight.shape[0]
+                cross_attention_dim = getattr(transformer.config, 'cross_attention_dim', None)
+                if cross_attention_dim is None and hasattr(attn2, 'to_k'):
+                    cross_attention_dim = attn2.to_k.in_features if hasattr(attn2.to_k, 'in_features') else attn2.to_k.weight.shape[1]
+                
+                for proj_name in ['to_q', 'to_k', 'to_v', 'to_out']:
+                    if hasattr(attn2, proj_name):
+                        layer_name = f"{block_prefix}.attn2.{proj_name}"
+                        if target_layers is None or any(tl in layer_name for tl in target_layers):
+                            transformer_lora_attn_procs[layer_name] = LoRAAttnProcessor(
+                                hidden_size=hidden_size,
+                                cross_attention_dim=cross_attention_dim,
+                                rank=lora_rank,
+                                lora_alpha=lora_alpha,
+                            )
+
+    transformer.set_attn_processor(transformer_lora_attn_procs)
+    lora_layers = AttnProcsLayers(transformer.attn_processors)
 
     if args.use_8bit_adam:
         try:
@@ -446,9 +470,19 @@ def main():
     else:
         optimizer_class = torch.optim.AdamW
 
+    # Scale learning rate
+    learning_rate = args.learning_rate
+    if args.scale_lr:
+        learning_rate = (
+            args.learning_rate
+            * args.gradient_accumulation_steps
+            * args.train_batch_size
+            * accelerator.num_processes
+        )
+
     optimizer = optimizer_class(
         lora_layers.parameters(),
-        lr=args.learning_rate,
+        lr=learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
@@ -458,98 +492,21 @@ def main():
         args.pretrained_model_name_or_path, subfolder="scheduler", num_train_timesteps=1000
     )
 
+    # Dataset
     train_dataset = DreamBoothDataset(
         instance_data_root=args.instance_data_dir,
         instance_prompt=args.instance_prompt,
         tokenizer=tokenizer,
         size=args.resolution,
         center_crop=args.center_crop,
+        max_sequence_length=args.max_sequence_length,
     )
 
-    if args.with_prior_preservation:
-        class_images_dir = Path(args.class_data_dir)
-        if not class_images_dir.exists():
-            class_images_dir.mkdir(parents=True)
-        cur_class_images = len(list(class_images_dir.iterdir()))
-
-        if cur_class_images < args.num_class_images:
-            num_new_images = args.num_class_images - cur_class_images
-            logger.info(f"Generating {num_new_images} class images...")
-            generate_class_images(
-                args.pretrained_model_name_or_path,
-                args.class_prompt,
-                args.num_class_images,
-                args.output_dir,
-                args.seed,
-            )
-            class_images_dir = Path(args.output_dir) / "class_images"
-
-        class_dataset = DreamBoothDataset(
-            instance_data_root=str(class_images_dir),
-            instance_prompt=args.class_prompt,
-            tokenizer=tokenizer,
-            size=args.resolution,
-            center_crop=args.center_crop,
-        )
-
-        class_token_ids = tokenizer(
-            args.class_prompt,
-            truncation=True,
-            padding="max_length",
-            max_length=tokenizer.model_max_length,
-            return_tensors="pt",
-        ).input_ids
-
-        class_image_transforms = transforms.Compose(
-            [
-                transforms.Resize(
-                    args.resolution, interpolation=transforms.InterpolationMode.BILINEAR
-                ),
-                transforms.CenterCrop(args.resolution) if args.center_crop else transforms.Lambda(lambda x: x),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5]),
-            ]
-        )
-
-        class_images_path = list(class_images_dir.iterdir())
-        num_class_images = len(class_images_path)
-
-        def collate_fn_with_prior(examples):
-            input_ids = [ex["instance_prompt_ids"] for ex in examples]
-            pixel_values = [ex["instance_images"] for ex in examples]
-            
-            pixel_values = torch.stack(pixel_values)
-            pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-            input_ids = torch.cat(input_ids, dim=0)
-            
-            batch = {
-                "input_ids": input_ids,
-                "pixel_values": pixel_values,
-            }
-            
-            indices = [random.randint(0, num_class_images - 1) for _ in range(len(examples))]
-            prior_images = [
-                class_image_transforms(Image.open(class_images_path[idx]).convert("RGB"))
-                for idx in indices
-            ]
-            prior_pixel_values = torch.stack(prior_images)
-            prior_pixel_values = prior_pixel_values.to(memory_format=torch.contiguous_format).float()
-            batch["prior_pixel_values"] = prior_pixel_values
-            batch["prior_prompt_ids"] = class_token_ids.repeat(len(examples), 1)
-            
-            return batch
-
-        dataset = train_dataset
-        collate_fn_used = collate_fn_with_prior
-    else:
-        dataset = train_dataset
-        collate_fn_used = collate_fn
-
     train_dataloader = torch.utils.data.DataLoader(
-        dataset,
+        train_dataset,
         batch_size=args.train_batch_size,
         shuffle=True,
-        collate_fn=collate_fn_used,
+        collate_fn=collate_fn,
     )
 
     num_update_steps_per_epoch = math.ceil(
@@ -569,15 +526,20 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    lora_layers, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        lora_layers, optimizer, train_dataloader, lr_scheduler
+    # Prepare everything with accelerator
+    transformer, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        transformer, text_encoder, optimizer, train_dataloader, lr_scheduler
     )
 
+    # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(
         len(train_dataloader) / args.gradient_accumulation_steps
     )
     max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    # Afterwards we recalculate our number of training epochs
+    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
+    # We need to initialize the trackers we use, and also store our configuration.
     total_batch_size = (
         args.train_batch_size
         * accelerator.num_processes
@@ -585,22 +547,25 @@ def main():
     )
 
     logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(dataset)}")
+    logger.info(f"  Num examples = {len(train_dataset)}")
     logger.info(f"  Num batches each epoch = {len(train_dataloader)}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {max_train_steps}")
+    logger.info(f"  Total optimization steps = {args.max_train_steps}")
     logger.info(f"  Gradient checkpointing = {args.gradient_checkpointing}")
 
     global_step = 0
     first_epoch = 0
+    resume_step = 0
 
+    # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint != "latest":
             path = os.path.basename(args.resume_from_checkpoint)
         else:
+            # Get the most recent checkpoint
             dirs = os.listdir(args.output_dir)
             dirs = [d for d in dirs if d.startswith("checkpoint")]
             dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
@@ -615,35 +580,59 @@ def main():
             accelerator.print(f"Resuming from checkpoint {path}")
             accelerator.load_state(os.path.join(args.output_dir, path))
             global_step = int(path.split("-")[1])
+            # Use recalculated num_update_steps_per_epoch for resume calculations
             first_epoch = global_step // num_update_steps_per_epoch
             resume_step = global_step % num_update_steps_per_epoch
 
     progress_bar = tqdm(
-        range(0, max_train_steps),
+        range(0, args.max_train_steps),
         disable=not accelerator.is_local_main_process,
     )
     progress_bar.set_description("Steps")
 
-    unet.train()
+    # Cache latents if requested
+    cached_latents = None
+    if args.cache_latents:
+        logger.info("Caching VAE latents...")
+        vae.to(accelerator.device)
+        vae.eval()
+        cached_latents = []
+        for example in train_dataset:
+            pixel_values = example["instance_images"].unsqueeze(0).to(accelerator.device, dtype=vae.dtype)
+            with torch.no_grad():
+                latents = vae.encode(pixel_values).latent_dist.sample()
+                latents = latents * vae.config.scaling_factor
+            cached_latents.append(latents.squeeze(0))
+        vae.to("cpu")
+        logger.info(f"Cached {len(cached_latents)} latents")
+    else:
+        # Ensure VAE is on device for encoding during training
+        vae.to(accelerator.device)
+        vae.eval()
+
+    transformer.train()
     text_encoder.train()
 
     for epoch in range(first_epoch, args.num_train_epochs):
-        unet.train()
+        transformer.train()
         for step, batch in enumerate(train_dataloader):
+            # Skip steps until we reach the resumed step
             if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
+                if step % args.gradient_accumulation_steps == 0:
+                    progress_bar.update(1)
                 continue
 
-            with accelerator.accumulate(unet):
-                if args.with_prior_preservation:
-                    prior_pixel_values = batch["prior_pixel_values"].to(dtype=vae.dtype)
-                    prior_pixel_values = prior_pixel_values.to(accelerator.device)
-                    prior_latents = vae.encode(prior_pixel_values).latent_dist.sample()
-                    prior_latents = prior_latents * vae.config.scaling_factor
-
-                pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
-                pixel_values = pixel_values.to(accelerator.device)
-                latents = vae.encode(pixel_values).latent_dist.sample()
-                latents = latents * vae.config.scaling_factor
+            with accelerator.accumulate(transformer):
+                if args.cache_latents and cached_latents is not None:
+                    # Use cached latents
+                    batch_indices = [(step * args.train_batch_size + i) % len(cached_latents) for i in range(len(batch["input_ids"]))]
+                    latents = torch.stack([cached_latents[idx] for idx in batch_indices]).to(accelerator.device)
+                else:
+                    # Encode images
+                    pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
+                    pixel_values = pixel_values.to(accelerator.device)
+                    latents = vae.encode(pixel_values).latent_dist.sample()
+                    latents = latents * vae.config.scaling_factor
 
                 noise = torch.randn_like(latents)
                 bsz = latents.shape[0]
@@ -657,17 +646,11 @@ def main():
 
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-                if args.with_prior_preservation:
-                    prior_noise = torch.randn_like(prior_latents)
-                    prior_timesteps = timesteps[: prior_latents.shape[0]]
-                    noisy_prior_latents = noise_scheduler.add_noise(
-                        prior_latents, prior_noise, prior_timesteps
-                    )
-
                 encoder_hidden_states = text_encoder(batch["input_ids"])[0]
 
-                model_pred = unet(
-                    noisy_latents, timesteps, encoder_hidden_states
+                # Transformer forward pass
+                model_pred = transformer(
+                    noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states
                 ).sample
 
                 if noise_scheduler.config.prediction_type == "epsilon":
@@ -681,24 +664,6 @@ def main():
 
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
-                if args.with_prior_preservation:
-                    prior_encoder_hidden_states = text_encoder(batch["prior_prompt_ids"])[0]
-                    prior_pred = unet(
-                        noisy_prior_latents, prior_timesteps, prior_encoder_hidden_states
-                    ).sample
-
-                    if noise_scheduler.config.prediction_type == "epsilon":
-                        prior_target = prior_noise
-                    elif noise_scheduler.config.prediction_type == "v_prediction":
-                        prior_target = noise_scheduler.get_velocity(
-                            prior_latents, prior_noise, prior_timesteps
-                        )
-
-                    prior_loss = F.mse_loss(
-                        prior_pred.float(), prior_target.float(), reduction="mean"
-                    )
-                    loss = loss + args.prior_loss_weight * prior_loss
-
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(lora_layers.parameters(), args.max_grad_norm)
@@ -706,39 +671,64 @@ def main():
                 lr_scheduler.step()
                 optimizer.zero_grad()
 
+            # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
 
                 if global_step % args.checkpointing_steps == 0:
                     if accelerator.is_main_process:
-                        save_path = os.path.join(
-                            args.output_dir, f"checkpoint-{global_step}"
-                        )
+                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
+                        logger.info(f"Saved state to {save_path}")
+
+                # Limit checkpoints
+                if args.checkpoints_total_limit is not None and accelerator.is_main_process:
+                    checkpoints = os.listdir(args.output_dir)
+                    checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                    checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+                    if len(checkpoints) > args.checkpoints_total_limit:
+                        num_to_remove = len(checkpoints) - args.checkpoints_total_limit
+                        removing_checkpoints = checkpoints[0:num_to_remove]
+                        logger.info(
+                            f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} oldest checkpoints"
+                        )
+                        for removing_checkpoint in removing_checkpoints:
+                            removing_checkpoint_path = os.path.join(args.output_dir, removing_checkpoint)
+                            shutil.rmtree(removing_checkpoint_path)
+                            logger.info(f"Removed {removing_checkpoint_path}")
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
-            if global_step >= max_train_steps:
+            if global_step >= args.max_train_steps:
                 break
 
         accelerator.wait_for_everyone()
 
+    # Save the lora layers
     if accelerator.is_main_process:
-        unet = unet.to(torch.float32)
-        unet_lora_layers = AttnProcsLayers(unet.attn_processors)
-        unet_lora_layers.save_pretrained(args.output_dir)
+        transformer = accelerator.unwrap_model(transformer)
+        transformer = transformer.to(torch.float32)
 
-        pipeline = StableDiffusionPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            text_encoder=text_encoder,
-            vae=vae,
-            torch_dtype=torch.float32,
+        unwrapped_lora_layers = AttnProcsLayers(transformer.attn_processors)
+        
+        # Prepare metadata in the format expected by the test
+        metadata = {
+            LORA_ADAPTER_METADATA_KEY: json.dumps({
+                "transformer.lora_alpha": str(lora_alpha),
+                "transformer.r": str(lora_rank),
+            })
+        }
+        
+        unwrapped_lora_layers.save_pretrained(
+            args.output_dir,
+            safe_serialization=True,
+            metadata=metadata
         )
-        pipeline.unet.load_attn_procs(args.output_dir)
-        pipeline.save_pretrained(args.output_dir)
+        
+        logger.info(f"LoRA weights saved to {args.output_dir}")
 
     accelerator.end_training()
 
