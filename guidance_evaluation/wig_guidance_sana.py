@@ -4,10 +4,15 @@ import json
 import torch
 import numpy as np
 import torch.nn.functional as F
+from tqdm import tqdm
 from diffusers import StableDiffusionPipeline, DDIMScheduler
-from guidance_methods import GuidancePipeline, SanaGuidancePipeline
-from evaluation_code import Evaluator
-from golden_search import golden_section_search
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from utils.guidance_methods import GuidancePipeline, SanaGuidancePipeline
+from utils.evaluation_code import Evaluator
+from utils.golden_search import golden_section_search
 
 # Note: This script requires SANA pipeline support
 # Adapt based on your SANA pipeline implementation
@@ -58,27 +63,22 @@ def load_finetuned_sana_pipeline(
         raise ImportError(f"Failed to load finetuned SANA pipeline: {e}")
 
 
-def evaluate_cfg_sana(
+def evaluate_wig_sana(
     pretrained_model_path: str,
     lora_base_dir: str,
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
     guidance_scale: float = 7.5,
+    omega: float = 0.0,
     num_images_per_prompt: int = 1,
     instance_data_dir: str = None,
 ):
     """
-    Evaluate CFG guidance for SANA model.
+    Evaluate Weight Interpolation Guidance (WIG) for SANA model.
     Uses 1024x1024 resolution and 20 inference steps with FlowDPM-Solver.
     """
-    import json
-    from pathlib import Path
-    from tqdm import tqdm
-    
-    with open(evaluation_prompts_path, "r") as f:
-        data = json.load(f)
-    subjects = data["subjects"]
+    pretrained_pipeline = load_pretrained_sana_pipeline(pretrained_model_path, device)
     
     evaluator = Evaluator(
         model_path=None,
@@ -96,7 +96,7 @@ def evaluate_cfg_sana(
     current_pipeline = None
     current_subject = None
     
-    for idx, prompt in enumerate(tqdm(evaluator.prompts, desc="Evaluating SANA")):
+    for idx, prompt in enumerate(tqdm(evaluator.prompts, desc="Evaluating SANA WIG")):
         subject = evaluator.subject_per_prompt[idx]
         
         if subject != current_subject:
@@ -105,9 +105,11 @@ def evaluate_cfg_sana(
                 print(f"Warning: No fully trained LoRA model found for subject '{subject}' in {lora_base_dir}, skipping...")
                 continue
             
-            current_pipeline = load_finetuned_sana_pipeline(
+            finetuned_pipeline = load_finetuned_sana_pipeline(
                 pretrained_model_path, lora_path, device
             )
+            finetuned_pipeline.set_pretrained_models(pretrained_pipeline)
+            current_pipeline = finetuned_pipeline
             current_subject = subject
             
             if subject not in subject_metrics:
@@ -121,8 +123,9 @@ def evaluate_cfg_sana(
         def generate_images(p):
             result = current_pipeline.generate_with_guidance(
                 prompt=p,
-                guidance_method="cfg",
+                guidance_method="wig",
                 guidance_scale=guidance_scale,
+                omega=omega,
                 num_inference_steps=20,  # SANA uses 20 steps
                 height=1024,  # SANA uses 1024x1024
                 width=1024,
@@ -199,24 +202,26 @@ def evaluate_cfg_sana(
     }
 
 
-def optimize_cfg_sana(
+def optimize_wig_lambda_sana(
     pretrained_model_path: str,
     lora_base_dir: str,
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
     lambda_range: tuple = (-10.0, 10.0),
+    omega: float = 0.0,
     num_images_per_prompt: int = 1,
     instance_data_dir: str = None,
 ):
     def objective(lambda_val):
-        scores = evaluate_cfg_sana(
+        scores = evaluate_wig_sana(
             pretrained_model_path=pretrained_model_path,
             lora_base_dir=lora_base_dir,
             evaluation_prompts_path=evaluation_prompts_path,
-            output_dir=os.path.join(output_dir, f"temp_cfg_{lambda_val}"),
+            output_dir=os.path.join(output_dir, f"temp_wig_lambda_{lambda_val}"),
             device=device,
             guidance_scale=lambda_val,
+            omega=omega,
             num_images_per_prompt=num_images_per_prompt,
             instance_data_dir=instance_data_dir,
         )
@@ -227,13 +232,14 @@ def optimize_cfg_sana(
         objective, lambda_range[0], lambda_range[1]
     )
 
-    best_scores = evaluate_cfg_sana(
+    best_scores = evaluate_wig_sana(
         pretrained_model_path=pretrained_model_path,
         lora_base_dir=lora_base_dir,
         evaluation_prompts_path=evaluation_prompts_path,
-        output_dir=os.path.join(output_dir, "cfg_optimized"),
+        output_dir=os.path.join(output_dir, "wig_optimized_lambda"),
         device=device,
         guidance_scale=best_lambda,
+        omega=omega,
         num_images_per_prompt=num_images_per_prompt,
         instance_data_dir=instance_data_dir,
     )
@@ -241,8 +247,102 @@ def optimize_cfg_sana(
     return best_lambda, best_scores
 
 
+def optimize_wig_omega_sana(
+    pretrained_model_path: str,
+    lora_base_dir: str,
+    evaluation_prompts_path: str,
+    output_dir: str,
+    device: str = "cuda",
+    guidance_scale: float = 7.5,
+    omega_range: tuple = (0.0, 1.0),
+    num_images_per_prompt: int = 1,
+    instance_data_dir: str = None,
+):
+    omega_values = [round(i * 0.1, 1) for i in range(11)]
+    best_omega = 0.0
+    best_dino = -float('inf')
+    all_results = {}
+
+    for omega_val in omega_values:
+        print(f"Evaluating omega={omega_val:.1f}...")
+        scores = evaluate_wig_sana(
+            pretrained_model_path=pretrained_model_path,
+            lora_base_dir=lora_base_dir,
+            evaluation_prompts_path=evaluation_prompts_path,
+            output_dir=os.path.join(output_dir, f"temp_wig_omega_{omega_val}"),
+            device=device,
+            guidance_scale=guidance_scale,
+            omega=omega_val,
+            num_images_per_prompt=num_images_per_prompt,
+            instance_data_dir=instance_data_dir,
+        )
+        dino_score = scores.get("DINO", 0)
+        all_results[omega_val] = scores
+        
+        if dino_score > best_dino:
+            best_dino = dino_score
+            best_omega = omega_val
+
+    print(f"\nBest omega: {best_omega:.1f} (DINO: {best_dino:.4f})")
+    
+    best_scores = evaluate_wig_sana(
+        pretrained_model_path=pretrained_model_path,
+        lora_base_dir=lora_base_dir,
+        evaluation_prompts_path=evaluation_prompts_path,
+        output_dir=os.path.join(output_dir, "wig_optimized_omega"),
+        device=device,
+        guidance_scale=guidance_scale,
+        omega=best_omega,
+        num_images_per_prompt=num_images_per_prompt,
+        instance_data_dir=instance_data_dir,
+    )
+
+    return best_omega, best_scores
+
+
+def optimize_wig_both_sana(
+    pretrained_model_path: str,
+    lora_base_dir: str,
+    evaluation_prompts_path: str,
+    output_dir: str,
+    device: str = "cuda",
+    lambda_range: tuple = (-10.0, 10.0),
+    omega_range: tuple = (0.0, 1.0),
+    num_images_per_prompt: int = 1,
+    instance_data_dir: str = None,
+):
+    print("Optimizing lambda first...")
+    best_lambda, _ = optimize_wig_lambda_sana(
+        pretrained_model_path=pretrained_model_path,
+        lora_base_dir=lora_base_dir,
+        evaluation_prompts_path=evaluation_prompts_path,
+        output_dir=output_dir,
+        device=device,
+        lambda_range=lambda_range,
+        omega=0.0,
+        num_images_per_prompt=num_images_per_prompt,
+        instance_data_dir=instance_data_dir,
+    )
+
+    print(f"Best lambda: {best_lambda:.4f}")
+    print("Optimizing omega...")
+    best_omega, best_scores = optimize_wig_omega_sana(
+        pretrained_model_path=pretrained_model_path,
+        lora_base_dir=lora_base_dir,
+        evaluation_prompts_path=evaluation_prompts_path,
+        output_dir=output_dir,
+        device=device,
+        guidance_scale=best_lambda,
+        omega_range=omega_range,
+        num_images_per_prompt=num_images_per_prompt,
+        instance_data_dir=instance_data_dir,
+    )
+
+    return best_lambda, best_omega, best_scores
+
+
 def main():
-    parser = argparse.ArgumentParser(description="CFG Guidance Evaluation for SANA")
+    parser = argparse.ArgumentParser(description="Weight Interpolation Guidance (WIG) Evaluation for SANA")
     parser.add_argument(
         "--pretrained_model_path",
         type=str,
@@ -258,13 +358,13 @@ def main():
     parser.add_argument(
         "--evaluation_prompts_path",
         type=str,
-        default="evaluation_prompts.json",
+        default="config/evaluation_prompts.json",
         help="Path to evaluation prompts JSON",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="cfg_outputs_sana",
+        default="wig_outputs_sana",
         help="Output directory",
     )
     parser.add_argument(
@@ -280,9 +380,17 @@ def main():
         help="Guidance scale",
     )
     parser.add_argument(
+        "--omega",
+        type=float,
+        default=0.0,
+        help="Omega parameter for weight interpolation",
+    )
+    parser.add_argument(
         "--optimize",
-        action="store_true",
-        help="Optimize guidance scale using golden search",
+        type=str,
+        choices=["lambda", "omega", "both"],
+        default=None,
+        help="Optimize lambda, omega, or both",
     )
     parser.add_argument(
         "--lambda_range",
@@ -290,6 +398,13 @@ def main():
         nargs=2,
         default=[-10.0, 10.0],
         help="Range for lambda optimization",
+    )
+    parser.add_argument(
+        "--omega_range",
+        type=float,
+        nargs=2,
+        default=[0.0, 1.0],
+        help="Range for omega optimization",
     )
     parser.add_argument(
         "--num_images_per_prompt",
@@ -308,47 +423,116 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    if args.optimize:
-        print("Optimizing CFG guidance scale for SANA...")
-        best_lambda, scores = optimize_cfg_sana(
+    if args.optimize == "lambda":
+        print("Optimizing SANA WIG lambda...")
+        best_lambda, scores = optimize_wig_lambda_sana(
             pretrained_model_path=args.pretrained_model_path,
             lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
             output_dir=args.output_dir,
             device=args.device,
             lambda_range=tuple(args.lambda_range),
+            omega=args.omega,
             num_images_per_prompt=args.num_images_per_prompt,
             instance_data_dir=args.instance_data_dir,
         )
-        print(f"\n=== SANA CFG Optimization Results ===")
+        print(f"\n=== SANA WIG Lambda Optimization Results ===")
         print(f"Best Lambda: {best_lambda:.4f}")
+        print(f"Omega: {args.omega:.4f}")
         print(f"Scores:")
         for metric, score in scores.items():
             if score is not None:
                 print(f"  {metric}: {score:.4f}")
 
         results = {
-            "method": "cfg_sana",
+            "method": "wig_sana",
             "lambda": best_lambda,
+            "omega": args.omega,
             "scores": scores,
         }
-        results_path = os.path.join(args.output_dir, "cfg_optimization_results.json")
+        results_path = os.path.join(args.output_dir, "wig_lambda_optimization_results.json")
         with open(results_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to {results_path}")
-    else:
-        print(f"Evaluating SANA CFG with guidance_scale={args.guidance_scale}...")
-        scores = evaluate_cfg_sana(
+
+    elif args.optimize == "omega":
+        print("Optimizing SANA WIG omega...")
+        best_omega, scores = optimize_wig_omega_sana(
             pretrained_model_path=args.pretrained_model_path,
             lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
             output_dir=args.output_dir,
             device=args.device,
             guidance_scale=args.guidance_scale,
+            omega_range=tuple(args.omega_range),
             num_images_per_prompt=args.num_images_per_prompt,
             instance_data_dir=args.instance_data_dir,
         )
-        print("\n=== SANA CFG Evaluation Results ===")
+        print(f"\n=== SANA WIG Omega Optimization Results ===")
+        print(f"Lambda: {args.guidance_scale:.4f}")
+        print(f"Best Omega: {best_omega:.4f}")
+        print(f"Scores:")
+        for metric, score in scores.items():
+            if score is not None:
+                print(f"  {metric}: {score:.4f}")
+
+        results = {
+            "method": "wig_sana",
+            "lambda": args.guidance_scale,
+            "omega": best_omega,
+            "scores": scores,
+        }
+        results_path = os.path.join(args.output_dir, "wig_omega_optimization_results.json")
+        with open(results_path, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\nResults saved to {results_path}")
+
+    elif args.optimize == "both":
+        print("Optimizing SANA WIG lambda and omega...")
+        best_lambda, best_omega, scores = optimize_wig_both_sana(
+            pretrained_model_path=args.pretrained_model_path,
+            lora_base_dir=args.lora_base_dir,
+            evaluation_prompts_path=args.evaluation_prompts_path,
+            output_dir=args.output_dir,
+            device=args.device,
+            lambda_range=tuple(args.lambda_range),
+            omega_range=tuple(args.omega_range),
+            num_images_per_prompt=args.num_images_per_prompt,
+            instance_data_dir=args.instance_data_dir,
+        )
+        print(f"\n=== SANA WIG Full Optimization Results ===")
+        print(f"Best Lambda: {best_lambda:.4f}")
+        print(f"Best Omega: {best_omega:.4f}")
+        print(f"Scores:")
+        for metric, score in scores.items():
+            if score is not None:
+                print(f"  {metric}: {score:.4f}")
+
+        results = {
+            "method": "wig_sana",
+            "lambda": best_lambda,
+            "omega": best_omega,
+            "scores": scores,
+        }
+        results_path = os.path.join(args.output_dir, "wig_full_optimization_results.json")
+        with open(results_path, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\nResults saved to {results_path}")
+
+    else:
+        print(f"Evaluating SANA WIG with guidance_scale={args.guidance_scale}, omega={args.omega}...")
+        scores = evaluate_wig_sana(
+            pretrained_model_path=args.pretrained_model_path,
+            lora_base_dir=args.lora_base_dir,
+            evaluation_prompts_path=args.evaluation_prompts_path,
+            output_dir=args.output_dir,
+            device=args.device,
+            guidance_scale=args.guidance_scale,
+            omega=args.omega,
+            num_images_per_prompt=args.num_images_per_prompt,
+            instance_data_dir=args.instance_data_dir,
+        )
+        print("\n=== SANA WIG Evaluation Results ===")
         for metric, score in scores.items():
             if score is not None:
                 print(f"{metric}: {score:.4f}")

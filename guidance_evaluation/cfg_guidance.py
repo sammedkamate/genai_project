@@ -4,78 +4,59 @@ import json
 import torch
 import numpy as np
 import torch.nn.functional as F
-from diffusers import StableDiffusionPipeline, DDIMScheduler
-from guidance_methods import GuidancePipeline, SanaGuidancePipeline
-from evaluation_code import Evaluator
-from golden_search import golden_section_search
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-# Note: This script requires SANA pipeline support
-# Adapt based on your SANA pipeline implementation
-
-
-def load_pretrained_sana_pipeline(model_path: str, device: str = "cuda"):
-    """
-    Load pretrained SANA pipeline.
-    Note: Adapt based on actual SANA pipeline class and import.
-    """
-    try:
-        # Example: from diffusers import SanaPipeline
-        # pipeline = SanaPipeline.from_pretrained(...)
-        # Or use the official SANA repository pipeline
-        raise NotImplementedError(
-            "SANA pipeline loading not implemented. "
-            "Please adapt this function based on your SANA pipeline implementation."
-        )
-    except Exception as e:
-        raise ImportError(f"Failed to load SANA pipeline: {e}")
+from diffusers import StableDiffusionPipeline, DDIMScheduler, DDPMScheduler
+from utils.guidance_methods import GuidancePipeline
+from utils.evaluation_code import Evaluator
+from utils.golden_search import golden_section_search
 
 
-def load_finetuned_sana_pipeline(
+def load_pretrained_pipeline(model_path: str, device: str = "cuda"):
+    pipeline = StableDiffusionPipeline.from_pretrained(
+        model_path,
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        safety_checker=None,
+        requires_safety_checker=False,
+    )
+    # Use DDIMScheduler with 50 inference steps for SD 1.5/2.1
+    pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
+    pipeline = pipeline.to(device)
+    return pipeline
+
+
+def load_finetuned_pipeline(
     pretrained_model_path: str,
     lora_path: str,
     device: str = "cuda",
 ):
-    """
-    Load finetuned SANA pipeline with LoRA weights.
-    """
-    try:
-        pipeline = load_pretrained_sana_pipeline(pretrained_model_path, device)
-        
-        # Load LoRA weights for SANA transformer
-        # Adapt based on SANA LoRA loading mechanism
-        # Example: pipeline.transformer.load_attn_procs(lora_path)
-        
-        # Set FlowDPM-Solver scheduler for inference (20 steps)
-        # Note: Adapt scheduler name based on actual SANA scheduler
-        # try:
-        #     from diffusers import FlowMatchEulerDiscreteScheduler
-        #     pipeline.scheduler = FlowMatchEulerDiscreteScheduler.from_config(...)
-        # except ImportError:
-        #     pass
-        
-        return SanaGuidancePipeline(pipeline)
-    except Exception as e:
-        raise ImportError(f"Failed to load finetuned SANA pipeline: {e}")
+    pipeline = GuidancePipeline.from_pretrained(
+        pretrained_model_path,
+        torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+        safety_checker=None,
+        requires_safety_checker=False,
+    )
+    # Use DDIMScheduler with 50 inference steps for SD 1.5/2.1
+    pipeline.scheduler = DDIMScheduler.from_config(pipeline.scheduler.config)
+    pipeline.unet.load_attn_procs(lora_path)
+    pipeline = pipeline.to(device)
+    return pipeline
 
 
-def evaluate_ag_sana(
+def evaluate_cfg(
     pretrained_model_path: str,
     lora_base_dir: str,
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
-    guidance_scale: float = 2.0,
-    cfg_scale: float = 7.5,
+    guidance_scale: float = 7.5,
     num_images_per_prompt: int = 1,
     instance_data_dir: str = None,
 ):
-    """
-    Evaluate AutoGuidance (CFG + AG) for SANA model.
-    Uses 1024x1024 resolution and 20 inference steps with FlowDPM-Solver.
-    """
     import json
     from pathlib import Path
-    from tqdm import tqdm
     
     with open(evaluation_prompts_path, "r") as f:
         data = json.load(f)
@@ -97,29 +78,19 @@ def evaluate_ag_sana(
     current_pipeline = None
     current_subject = None
     
-    for idx, prompt in enumerate(tqdm(evaluator.prompts, desc="Evaluating SANA AG")):
+    from tqdm import tqdm
+    for idx, prompt in enumerate(tqdm(evaluator.prompts, desc="Evaluating")):
         subject = evaluator.subject_per_prompt[idx]
         
         if subject != current_subject:
-            lora_path_full = evaluator._find_lora_path(subject, lora_base_dir, checkpoint_type="full")
-            if not lora_path_full:
+            lora_path = evaluator._find_lora_path(subject, lora_base_dir, checkpoint_type="full")
+            if not lora_path:
                 print(f"Warning: No fully trained LoRA model found for subject '{subject}' in {lora_base_dir}, skipping...")
                 continue
             
-            finetuned_pipeline = load_finetuned_sana_pipeline(
-                pretrained_model_path, lora_path_full, device
+            current_pipeline = load_finetuned_pipeline(
+                pretrained_model_path, lora_path, device
             )
-            
-            lora_path_weak = evaluator._find_lora_path(subject, lora_base_dir, checkpoint_type="weak")
-            if lora_path_weak:
-                weak_pipeline = load_finetuned_sana_pipeline(
-                    pretrained_model_path, lora_path_weak, device
-                )
-            else:
-                weak_pipeline = load_pretrained_sana_pipeline(pretrained_model_path, device)
-            
-            finetuned_pipeline.set_weak_model(weak_pipeline)
-            current_pipeline = finetuned_pipeline
             current_subject = subject
             
             if subject not in subject_metrics:
@@ -133,12 +104,9 @@ def evaluate_ag_sana(
         def generate_images(p):
             result = current_pipeline.generate_with_guidance(
                 prompt=p,
-                guidance_method="ag",
+                guidance_method="cfg",
                 guidance_scale=guidance_scale,
-                cfg_scale=cfg_scale,
-                num_inference_steps=20,  # SANA uses 20 steps
-                height=1024,  # SANA uses 1024x1024
-                width=1024,
+                num_inference_steps=50,
                 num_images_per_prompt=num_images_per_prompt,
             )
             return result.images
@@ -212,26 +180,24 @@ def evaluate_ag_sana(
     }
 
 
-def optimize_ag_sana(
+def optimize_cfg(
     pretrained_model_path: str,
     lora_base_dir: str,
     evaluation_prompts_path: str,
     output_dir: str,
     device: str = "cuda",
-    cfg_scale: float = 7.5,
     lambda_range: tuple = (-10.0, 10.0),
     num_images_per_prompt: int = 1,
     instance_data_dir: str = None,
 ):
     def objective(lambda_val):
-        scores = evaluate_ag_sana(
+        scores = evaluate_cfg(
             pretrained_model_path=pretrained_model_path,
             lora_base_dir=lora_base_dir,
             evaluation_prompts_path=evaluation_prompts_path,
-            output_dir=os.path.join(output_dir, f"temp_ag_{lambda_val}"),
+            output_dir=os.path.join(output_dir, f"temp_cfg_{lambda_val}"),
             device=device,
             guidance_scale=lambda_val,
-            cfg_scale=cfg_scale,
             num_images_per_prompt=num_images_per_prompt,
             instance_data_dir=instance_data_dir,
         )
@@ -242,14 +208,13 @@ def optimize_ag_sana(
         objective, lambda_range[0], lambda_range[1]
     )
 
-    best_scores = evaluate_ag_sana(
+    best_scores = evaluate_cfg(
         pretrained_model_path=pretrained_model_path,
         lora_base_dir=lora_base_dir,
         evaluation_prompts_path=evaluation_prompts_path,
-        output_dir=os.path.join(output_dir, "ag_optimized"),
+        output_dir=os.path.join(output_dir, "cfg_optimized"),
         device=device,
         guidance_scale=best_lambda,
-        cfg_scale=cfg_scale,
         num_images_per_prompt=num_images_per_prompt,
         instance_data_dir=instance_data_dir,
     )
@@ -258,12 +223,12 @@ def optimize_ag_sana(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AutoGuidance Evaluation for SANA")
+    parser = argparse.ArgumentParser(description="CFG Guidance Evaluation")
     parser.add_argument(
         "--pretrained_model_path",
         type=str,
-        default="hf-internal-testing/tiny-sana-pipe",
-        help="Path to pretrained SANA model",
+        default="runwayml/stable-diffusion-v1-5",
+        help="Path to pretrained model",
     )
     parser.add_argument(
         "--lora_base_dir",
@@ -274,13 +239,13 @@ def main():
     parser.add_argument(
         "--evaluation_prompts_path",
         type=str,
-        default="evaluation_prompts.json",
+        default="config/evaluation_prompts.json",
         help="Path to evaluation prompts JSON",
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="ag_outputs_sana",
+        default="cfg_outputs",
         help="Output directory",
     )
     parser.add_argument(
@@ -292,19 +257,13 @@ def main():
     parser.add_argument(
         "--guidance_scale",
         type=float,
-        default=2.0,
-        help="AG guidance scale",
-    )
-    parser.add_argument(
-        "--cfg_scale",
-        type=float,
         default=7.5,
-        help="CFG guidance scale",
+        help="Guidance scale",
     )
     parser.add_argument(
         "--optimize",
         action="store_true",
-        help="Optimize AG guidance scale (lambda) using golden search",
+        help="Optimize guidance scale using golden search",
     )
     parser.add_argument(
         "--lambda_range",
@@ -331,50 +290,46 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.optimize:
-        print("Optimizing SANA AutoGuidance guidance scale (lambda)...")
-        best_lambda, scores = optimize_ag_sana(
+        print("Optimizing CFG guidance scale...")
+        best_lambda, scores = optimize_cfg(
             pretrained_model_path=args.pretrained_model_path,
             lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
             output_dir=args.output_dir,
             device=args.device,
-            cfg_scale=args.cfg_scale,
             lambda_range=tuple(args.lambda_range),
             num_images_per_prompt=args.num_images_per_prompt,
             instance_data_dir=args.instance_data_dir,
         )
-        print(f"\n=== SANA AutoGuidance Optimization Results ===")
+        print(f"\n=== CFG Optimization Results ===")
         print(f"Best Lambda: {best_lambda:.4f}")
-        print(f"CFG Scale: {args.cfg_scale:.4f}")
         print(f"Scores:")
         for metric, score in scores.items():
             if score is not None:
                 print(f"  {metric}: {score:.4f}")
 
         results = {
-            "method": "ag_sana",
+            "method": "cfg",
             "lambda": best_lambda,
-            "cfg_scale": args.cfg_scale,
             "scores": scores,
         }
-        results_path = os.path.join(args.output_dir, "ag_optimization_results.json")
+        results_path = os.path.join(args.output_dir, "cfg_optimization_results.json")
         with open(results_path, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nResults saved to {results_path}")
     else:
-        print(f"Evaluating SANA AutoGuidance with guidance_scale={args.guidance_scale}...")
-        scores = evaluate_ag_sana(
+        print(f"Evaluating CFG with guidance_scale={args.guidance_scale}...")
+        scores = evaluate_cfg(
             pretrained_model_path=args.pretrained_model_path,
             lora_base_dir=args.lora_base_dir,
             evaluation_prompts_path=args.evaluation_prompts_path,
             output_dir=args.output_dir,
             device=args.device,
             guidance_scale=args.guidance_scale,
-            cfg_scale=args.cfg_scale,
             num_images_per_prompt=args.num_images_per_prompt,
             instance_data_dir=args.instance_data_dir,
         )
-        print("\n=== SANA AutoGuidance Evaluation Results ===")
+        print("\n=== CFG Evaluation Results ===")
         for metric, score in scores.items():
             if score is not None:
                 print(f"{metric}: {score:.4f}")

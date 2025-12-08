@@ -5,8 +5,9 @@ from typing import Callable, Tuple
 import json
 import os
 from PIL import Image
-from guidance_methods import GuidancePipeline
-from evaluation_code import Evaluator
+
+from .guidance_methods import GuidancePipeline
+from .evaluation_code import Evaluator
 
 
 def golden_section_search(

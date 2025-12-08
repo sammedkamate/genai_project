@@ -1,6 +1,19 @@
-# DreamBooth LoRA with Advanced Guidance Methods
+# WiG: Improving Guidance for Personalizing T2I Diffusion Models
 
-DreamBooth LoRA fine-tuning with multiple guidance techniques for diffusion model personalization.
+## Abstract
+
+There is a growing real-world need for diffusion-based generative models to support personalized generation, where a model can be adapted to a specific subject from just a few reference images. This is crucial for applications such as custom character rendering, virtual avatars, branded content creation, and personalized product design. However, current personalization methods often face a trade-off between visual fidelity and textual alignment: some preserve the subject's appearance but fail to follow textual instructions, while others follow prompts accurately but lose key visual traits.
+
+This challenge arises because existing guidance strategies typically rely on fixed reference models that cannot dynamically adjust to the degree of personalization. We aim to improve the balance between subject identity and prompt faithfulness in fine-tuned text-to-image diffusion models by developing a lightweight, training-free inference method. Our approach blends the knowledge of both the original and fine-tuned models during inference, steering generation toward outputs that maintain high subject fidelity while respecting textual intent.
+
+## Authors
+
+- **Bhavik Chandna** (PID: A69033934) - bchandna@ucsd.edu
+- **Ganesh Bannur** (PID: A69032587) - gbannur@ucsd.edu
+- **Sneh Davaria** (PID: A69033513) - sdavaria@ucsd.edu
+- **Sammed Kamate** (PID: A69032538) - skamate@ucsd.edu
+
+**Department of Computer Science, UC San Diego**
 
 ## Installation
 
@@ -10,14 +23,54 @@ pip install -r requirements.txt
 
 For SANA model support, you may need additional dependencies. Please refer to the [official SANA repository](https://github.com/NVlabs/Sana) for installation instructions.
 
-## Training
+## Quick Start
+
+### 1. Train a Personalized Model
+
+Train a DreamBooth LoRA model for Stable Diffusion:
+
+```bash
+accelerate launch training/train_dreambooth_lora.py \
+    --pretrained_model_name_or_path runwayml/stable-diffusion-v1-5 \
+    --instance_data_dir /path/to/images \
+    --instance_prompt "a photo of sks dog" \
+    --class_data_dir ./class_images \
+    --class_prompt "a photo of dog" \
+    --with_prior_preservation \
+    --prior_loss_weight 1.0 \
+    --output_dir ./outputs \
+    --max_train_steps 500 \
+    --train_batch_size 1 \
+    --rank 4 \
+    --learning_rate 1e-4 \
+    --resolution 512 \
+    --gradient_checkpointing \
+    --use_8bit_adam \
+    --mixed_precision fp16
+```
+
+### 2. Evaluate with WIG
+
+Generate personalized images using our Weight Interpolation Guidance:
+
+```bash
+python guidance_evaluation/wig_guidance.py \
+    --pretrained_model_path runwayml/stable-diffusion-v1-5 \
+    --lora_base_dir ./lora_models \
+    --evaluation_prompts_path config/evaluation_prompts.json \
+    --output_dir ./wig_outputs \
+    --instance_data_dir /path/to/reference/images \
+    --optimize both
+```
+
+## Main Training
 
 ### Stable Diffusion 1.5 / 2.1
 
 Train a DreamBooth LoRA model with prior-preservation:
 
 ```bash
-accelerate launch train_dreambooth_lora.py \
+accelerate launch training/train_dreambooth_lora.py \
     --pretrained_model_name_or_path runwayml/stable-diffusion-v1-5 \
     --instance_data_dir /path/to/images \
     --instance_prompt "a photo of sks dog" \
@@ -38,10 +91,10 @@ accelerate launch train_dreambooth_lora.py \
 
 ### SANA Model
 
-Train a DreamBooth LoRA model for SANA:
+Train a DreamBooth LoRA model for SANA (transformer-based architecture):
 
 ```bash
-accelerate launch train_dreambooth_lora_sana.py \
+accelerate launch training/train_dreambooth_lora_sana.py \
     --pretrained_model_name_or_path hf-internal-testing/tiny-sana-pipe \
     --instance_data_dir /path/to/images \
     --instance_prompt "a photo of sks dog" \
@@ -58,7 +111,7 @@ accelerate launch train_dreambooth_lora_sana.py \
     --max_sequence_length 256
 ```
 
-## Training Hyperparameters
+### Training Hyperparameters
 
 Fine-tuning was conducted with the following hyperparameters:
 
@@ -69,30 +122,43 @@ Fine-tuning was conducted with the following hyperparameters:
 - **Prior preservation loss**: Enabled (recommended)
 - **Maximum diffusion timesteps**: 1,000 (configured in scheduler)
 
-### Resolution
+### Resolution & Inference Settings
 
 - **Stable Diffusion 1.5/2.1**: 512×512 resolution for both training and inference
-- **SANA**: 1024×1024 resolution for both training and inference
-
-### Inference Settings
-
-- **Stable Diffusion 1.5/2.1**:
   - Scheduler: DDIM
   - Inference steps: 50
   
-- **SANA**:
+- **SANA**: 1024×1024 resolution for both training and inference
   - Scheduler: FlowDPM-Solver
   - Inference steps: 20
 
 ## Evaluation
 
-### CFG Guidance (Stable Diffusion)
+We provide evaluation scripts for three guidance methods: CFG, AutoGuidance (AG), and Weight Interpolation Guidance (WIG).
+
+### Weight Interpolation Guidance (WIG) - Stable Diffusion
+
+**Our proposed method** - Blends pretrained and fine-tuned model weights:
 
 ```bash
-python cfg_guidance.py \
+python guidance_evaluation/wig_guidance.py \
     --pretrained_model_path runwayml/stable-diffusion-v1-5 \
     --lora_base_dir ./lora_models \
-    --evaluation_prompts_path evaluation_prompts.json \
+    --evaluation_prompts_path config/evaluation_prompts.json \
+    --output_dir ./wig_outputs \
+    --instance_data_dir /path/to/reference/images \
+    --optimize both
+```
+
+### Classifier-Free Guidance (CFG) - Stable Diffusion
+
+Baseline method for comparison:
+
+```bash
+python guidance_evaluation/cfg_guidance.py \
+    --pretrained_model_path runwayml/stable-diffusion-v1-5 \
+    --lora_base_dir ./lora_models \
+    --evaluation_prompts_path config/evaluation_prompts.json \
     --output_dir ./cfg_outputs \
     --instance_data_dir /path/to/reference/images \
     --optimize
@@ -100,11 +166,13 @@ python cfg_guidance.py \
 
 ### AutoGuidance (CFG + AG) - Stable Diffusion
 
+AutoGuidance combines CFG with a weak model:
+
 ```bash
-python ag_guidance.py \
+python guidance_evaluation/ag_guidance.py \
     --pretrained_model_path runwayml/stable-diffusion-v1-5 \
     --lora_base_dir ./lora_models \
-    --evaluation_prompts_path evaluation_prompts.json \
+    --evaluation_prompts_path config/evaluation_prompts.json \
     --output_dir ./ag_outputs \
     --instance_data_dir /path/to/reference/images \
     --cfg_scale 7.5 \
@@ -114,37 +182,34 @@ python ag_guidance.py \
 
 **Note:** AG automatically uses `weak/` subdirectory within each folder as the weak model checkpoint.
 
-### Weight Interpolation Guidance (WIG) - Stable Diffusion
+### SANA Model Evaluation
+
+All three guidance methods are also supported for SANA models:
 
 ```bash
-python wig_guidance.py \
-    --pretrained_model_path runwayml/stable-diffusion-v1-5 \
-    --lora_base_dir ./lora_models \
-    --evaluation_prompts_path evaluation_prompts.json \
-    --output_dir ./wig_outputs \
-    --instance_data_dir /path/to/reference/images \
-    --optimize both
-```
-
-### CFG Guidance (SANA)
-
-```bash
-python cfg_guidance_sana.py \
+# WIG for SANA
+python guidance_evaluation/wig_guidance_sana.py \
     --pretrained_model_path hf-internal-testing/tiny-sana-pipe \
     --lora_base_dir ./lora_models_sana \
-    --evaluation_prompts_path evaluation_prompts.json \
+    --evaluation_prompts_path config/evaluation_prompts.json \
+    --output_dir ./wig_outputs_sana \
+    --instance_data_dir /path/to/reference/images \
+    --optimize both
+
+# CFG for SANA
+python guidance_evaluation/cfg_guidance_sana.py \
+    --pretrained_model_path hf-internal-testing/tiny-sana-pipe \
+    --lora_base_dir ./lora_models_sana \
+    --evaluation_prompts_path config/evaluation_prompts.json \
     --output_dir ./cfg_outputs_sana \
     --instance_data_dir /path/to/reference/images \
     --optimize
-```
 
-### AutoGuidance (CFG + AG) - SANA
-
-```bash
-python ag_guidance_sana.py \
+# AG for SANA
+python guidance_evaluation/ag_guidance_sana.py \
     --pretrained_model_path hf-internal-testing/tiny-sana-pipe \
     --lora_base_dir ./lora_models_sana \
-    --evaluation_prompts_path evaluation_prompts.json \
+    --evaluation_prompts_path config/evaluation_prompts.json \
     --output_dir ./ag_outputs_sana \
     --instance_data_dir /path/to/reference/images \
     --cfg_scale 7.5 \
@@ -152,35 +217,36 @@ python ag_guidance_sana.py \
     --optimize
 ```
 
-### Weight Interpolation Guidance (WIG) - SANA
-
-```bash
-python wig_guidance_sana.py \
-    --pretrained_model_path hf-internal-testing/tiny-sana-pipe \
-    --lora_base_dir ./lora_models_sana \
-    --evaluation_prompts_path evaluation_prompts.json \
-    --output_dir ./wig_outputs_sana \
-    --instance_data_dir /path/to/reference/images \
-    --optimize both
-```
-
 **Note:** All SANA evaluation scripts use 1024×1024 resolution and 20 inference steps with FlowDPM-Solver scheduler.
 
 ## Guidance Methods
 
-- **CFG**: Classifier-Free Guidance (Equation 5)
-- **AG**: CFG + AutoGuidance combination (Equation 6 with CFG)
-- **WIG**: Weight Interpolation Guidance with weight interpolation (Equations 7 & 9)
+Our implementation includes three guidance strategies:
+
+- **CFG**: Classifier-Free Guidance - Standard guidance method that amplifies the conditioning signal
+- **AG**: AutoGuidance - Combines CFG with a "weak" model to better preserve subject identity
+- **WIG**: Weight Interpolation Guidance (Our Method) - Dynamically blends pretrained and fine-tuned model weights during inference to balance subject fidelity and text alignment
+
+### Weight Interpolation Guidance (WIG) Details
+
+WIG addresses the trade-off between subject fidelity and text faithfulness by interpolating model weights:
+
+- **Weight interpolation parameter (ω)**: Controls the blend between pretrained and fine-tuned models
+- **ω = 0.0-0.3**: Maximizes subject fidelity (closer to fine-tuned model)
+- **ω = 0.4-0.6**: Balanced improvement with better preservation of text fidelity (blended model)
+- **Dynamic adjustment**: Allows fine-tuning of the trade-off for different use cases
+
+The optimization automatically sweeps ω values in 0.1 steps when using `--optimize both`.
 
 ## Optimization
 
-Optimization uses **DINO score** (subject fidelity) as the objective.
+Parameter optimization uses **DINO score** (subject fidelity) as the primary objective:
 
-- CFG: Golden section search for `--guidance_scale` (lambda)
-- AG: Golden section search for `--guidance_scale` (lambda), uses fixed `--cfg_scale` (CFG lambda = 7.5)
-- WIG: Golden section search for `--guidance_scale` (lambda), grid sweep for `--omega` 
+- **CFG**: Golden section search for `--guidance_scale` (lambda)
+- **AG**: Golden section search for `--guidance_scale` (lambda), uses fixed `--cfg_scale` (CFG lambda = 7.5)
+- **WIG**: Golden section search for `--guidance_scale` (lambda), grid sweep for `--omega` (weight interpolation parameter)
 
-## Parameters
+### Parameters
 
 - `--guidance_scale`: Guidance strength (lambda, optimized for CFG/AG/WIG)
 - `--cfg_scale`: CFG scale for AG method (depending on best lambda for cfg)
@@ -188,26 +254,21 @@ Optimization uses **DINO score** (subject fidelity) as the objective.
 - `--omega`: Weight interpolation parameter for WIG (0.0-1.0, swept in 0.1 steps)
 - `--weak_checkpoint_path`: Earlier checkpoint for AG weak model (optional)
 
-### Weight Interpolation (ω) for WIG
-
-For Weight Interpolation Guidance (WIG), the `omega` parameter controls the trade-off between subject fidelity and text fidelity:
-
-- **ω = 0.0-0.3**: Maximizes subject fidelity
-- **ω = 0.4-0.6**: Balanced improvement with better preservation of text fidelity
-
-The optimization automatically sweeps ω values in 0.1 steps when using `--optimize both`.
-
 ## Evaluation Metrics
+
+We evaluate generated images using three metrics:
 
 - **DINO**: Image-to-image similarity between reference and generated images (subject fidelity, optimization target)
 - **CLIP-I**: Image-to-image similarity between reference and generated images using CLIP embeddings
 - **CLIP-T**: Text-to-image similarity using CLIP embeddings (text prompt alignment)
 
+These metrics help quantify the trade-off between subject identity preservation and textual instruction following.
+
 ## Dataset Organization
 
 ### Reference Images (`instance_data_dir`)
 
-The `instance_data_dir` should contain subject-specific folders. Folder names are automatically mapped to subjects from `evaluation_prompts.json`:
+The `instance_data_dir` should contain subject-specific folders. Folder names are automatically mapped to subjects from `config/evaluation_prompts.json`:
 
 - Exact matches: `backpack` → `backpack`
 - Numbered variants: `cat2`, `dog2`, `dog7`, `dogcd` → `cat`, `dog` (base subject)
@@ -217,7 +278,7 @@ The `instance_data_dir` should contain subject-specific folders. Folder names ar
 
 ### LoRA Models (`lora_base_dir`)
 
-The `lora_base_dir` should contain subject-specific LoRA model folders. **Each folder must have two checkpoints:**
+The `lora_base_dir` should contain subject-specific LoRA model folders. **Each folder must have two checkpoints for AG evaluation:**
 
 ```
 lora_models/
@@ -239,15 +300,7 @@ lora_models/
 **Checkpoint Usage:**
 - **CFG**: Uses fully trained checkpoint (`lora_base_dir/folder_name/`)
 - **AG**: Uses under-trained (`lora_base_dir/folder_name/weak/`) as weak model + fully trained as fine model
-- **WIG**: Uses fully trained + pretrained model
-
-**Important:**
-- Folder names in `lora_base_dir` match dataset folder names (e.g., `cat2`, `dog2`, `cat_statue`)
-- Prompts use subject names from `evaluation_prompts.json` (e.g., "cat", "dog", "cat statue")
-- The code automatically maps folder names to subjects
-- Each folder is treated as a separate subject (no combining)
-- Each subject's prompts are evaluated independently with that subject's LoRA model
-- Each LoRA model has its own independent guidance optimization
+- **WIG**: Uses fully trained + pretrained model (no weak checkpoint needed)
 
 ## Output Organization
 
@@ -273,31 +326,79 @@ The `evaluation_summary.csv` contains:
 - `CLIP-T`: Average CLIP-T score (text-to-image similarity)
 - `DINO`: Average DINO score (subject fidelity)
 
-## Personalization Methods Details
+### Textual Inversion
 
-### DreamBooth-LoRA Configuration
+Textual Inversion is another personalization method that learns to represent specific concepts as new "words" in the embedding space of the text encoder. Use the `textual_inversion.ipynb` Jupyter notebook for training and evaluation.
 
-Following the implementation codes provided by Diffusers or the official SANA repository:
+To use Textual Inversion:
+1. Open `textual_inversion.ipynb` in Jupyter Notebook or JupyterLab
+2. Follow the notebook cells to:
+   - Set up your training data (instance images and prompts)
+   - Configure training hyperparameters
+   - Train the textual inversion embeddings
+   - Evaluate the trained embeddings with different guidance methods
 
-- **LoRA rank**: 4
-- **Learning rate**: 1e-4
-- **Prior preservation loss**: Enabled (recommended)
-- **LoRA layers**: Applied to attention processors in UNet (SD) or transformer blocks (SANA)
+The notebook includes evaluation using DINO, CLIP-I, and CLIP-T metrics similar to the DreamBooth LoRA evaluation scripts.
 
-For SANA models, LoRA is applied to transformer attention layers (e.g., `transformer_blocks.X.attn1.to_k`, `transformer_blocks.X.attn1.to_q`).
+### InstructPix2Pix
 
-## Files
+InstructPix2Pix is an image editing model that follows natural language instructions to edit images. Use the `instructpix2pix.ipynb` Jupyter notebook for image editing tasks.
 
-- `train_dreambooth_lora.py`: LoRA training for Stable Diffusion 1.5/2.1
-- `train_dreambooth_lora_sana.py`: LoRA training for SANA models
-- `guidance_methods.py`: Core guidance implementations (CFG, AG, WIG) with SANA support
-- `cfg_guidance.py`: CFG evaluation for Stable Diffusion
-- `cfg_guidance_sana.py`: CFG evaluation for SANA models
-- `ag_guidance.py`: CFG + AG evaluation for Stable Diffusion
-- `ag_guidance_sana.py`: CFG + AG evaluation for SANA models
-- `wig_guidance.py`: WIG evaluation for Stable Diffusion
-- `wig_guidance_sana.py`: WIG evaluation for SANA models
-- `evaluation_code.py`: Evaluation metrics (DINO, CLIP-I, CLIP-T)
-- `golden_search.py`: Parameter optimization
-- `evaluation_prompts.json`: Evaluation prompts
-- `requirements.txt`: Dependencies
+To use InstructPix2Pix:
+1. Open `instructpix2pix.ipynb` in Jupyter Notebook or JupyterLab
+2. Follow the notebook cells to:
+   - Load the InstructPix2Pix model
+   - Load or prepare input images
+   - Apply text-based image editing instructions
+   - Generate edited images
+
+## Project Structure
+
+```
+genai_project/
+├── README.md
+├── requirements.txt
+├── textual_inversion.ipynb                # Textual Inversion training and evaluation notebook
+├── instructpix2pix.ipynb                  # InstructPix2Pix image editing notebook
+├── training/
+│   ├── train_dreambooth_lora.py          # LoRA training for Stable Diffusion 1.5/2.1
+│   └── train_dreambooth_lora_sana.py     # LoRA training for SANA models
+├── guidance_evaluation/
+│   ├── cfg_guidance.py                   # CFG evaluation for Stable Diffusion
+│   ├── cfg_guidance_sana.py              # CFG evaluation for SANA models
+│   ├── ag_guidance.py                    # CFG + AG evaluation for Stable Diffusion
+│   ├── ag_guidance_sana.py               # CFG + AG evaluation for SANA models
+│   ├── wig_guidance.py                   # WIG evaluation for Stable Diffusion
+│   └── wig_guidance_sana.py              # WIG evaluation for SANA models
+├── utils/
+│   ├── guidance_methods.py               # Core guidance implementations (CFG, AG, WIG) with SANA support
+│   ├── evaluation_code.py                # Evaluation metrics (DINO, CLIP-I, CLIP-T)
+│   └── golden_search.py                  # Parameter optimization
+├── config/
+│   └── evaluation_prompts.json           # Evaluation prompts
+├── evaluation_code_ti.py                 # Textual Inversion evaluation code
+└── datasets/
+    └── ...                                # Dataset folders
+```
+
+## Citation
+
+If you use this code in your research, please cite:
+
+```bibtex
+@article{wig2024,
+  title={WiG: Improving Guidance for Personalizing T2I Diffusion Models},
+  author={Chandna, Bhavik and Bannur, Ganesh and Davaria, Sneh and Kamate, Sammed},
+  journal={CSE 291 Project Report},
+  year={2024},
+  institution={UC San Diego}
+}
+```
+
+## License
+
+This project is released for academic research purposes.
+
+## Acknowledgments
+
+We thank the open-source community for providing the foundational tools and models that made this research possible, including Hugging Face Diffusers, Stable Diffusion, and SANA.

@@ -5,10 +5,14 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from tqdm import tqdm
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from diffusers import StableDiffusionPipeline, DDIMScheduler
-from guidance_methods import GuidancePipeline
-from evaluation_code import Evaluator
-from golden_search import golden_section_search
+from utils.guidance_methods import GuidancePipeline
+from utils.evaluation_code import Evaluator
+from utils.golden_search import golden_section_search
 
 
 def load_pretrained_pipeline(model_path: str, device: str = "cuda"):
@@ -243,7 +247,7 @@ def main():
     parser.add_argument(
         "--evaluation_prompts_path",
         type=str,
-        default="evaluation_prompts.json",
+        default="config/evaluation_prompts.json",
         help="Path to evaluation prompts JSON",
     )
     parser.add_argument(
