@@ -402,3 +402,4 @@ This project is released for academic research purposes.
 ## Acknowledgments
 
 We thank the open-source community for providing the foundational tools and models that made this research possible, including Hugging Face Diffusers, Stable Diffusion, and SANA.
+
