@@ -390,7 +390,7 @@ If you use this code in your research, please cite:
   title={WiG: Improving Guidance for Personalizing T2I Diffusion Models},
   author={Chandna, Bhavik and Bannur, Ganesh and Davaria, Sneh and Kamate, Sammed},
   journal={CSE 291 Project Report},
-  year={2024},
+  year={2025},
   institution={UC San Diego}
 }
 ```
